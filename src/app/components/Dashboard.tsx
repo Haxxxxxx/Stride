@@ -403,7 +403,7 @@ export default function Dashboard() {
       />
       <ActiveOperation onOpenModal={() => setIsModalOpen(true)} todayWorkout={todayWorkout} />
       <OperationsList todayWorkout={todayWorkout} />
-      <WorkoutSequenceModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
+      <WorkoutSequenceModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} workoutDay={todayWorkout} />
     </div>
   );
 }

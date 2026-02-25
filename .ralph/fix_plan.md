@@ -134,11 +134,12 @@
   - Today's workout derived from active program → active protocol + exercise queue
   - If no active program, show "No active program" prompt with link to agent
 
-### 3.3 Wire WorkoutSequenceModal to real data
-- [ ] Accept workout data (exercises array) as props from Dashboard
-- [ ] Replace hardcoded exercise data with prop values
-- [ ] On complete: write workout log to `users/{uid}/workoutLogs/{auto-id}`
-- [ ] Update behaviorState in Firestore (streak, completions)
+### 3.3 Wire WorkoutSequenceModal to real data — DONE
+- [x] Accept workoutDay prop from Dashboard with exercises array
+- [x] Replace hardcoded exercise data with dynamic values (name, sets, reps, rest)
+- [x] Track current exercise index, advance through exercises sequentially
+- [x] On complete: write workout log to `users/{uid}/workoutLogs/{logId}` in Firestore
+- [x] behaviorState auto-syncs to Firestore via updated behaviorStore
 
 ### 3.4 Wire Progress screen to Firestore
 - [ ] Query `users/{uid}/workoutLogs` for past 28 days → build week grid

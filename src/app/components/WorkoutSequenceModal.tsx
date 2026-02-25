@@ -8,19 +8,35 @@ import {
   recordWorkoutCompleted,
   recordReflection,
 } from "../utils/behaviorStore";
+import { useAuth } from "../contexts/AuthContext";
+import { setDocument } from "../../services/firestore";
+import type { WorkoutDay, Exercise } from "../../services/programGenerator";
 
 interface WorkoutSequenceModalProps {
   isOpen: boolean;
   onClose: () => void;
+  workoutDay?: WorkoutDay | null;
 }
 
-export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalProps) {
+export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSequenceModalProps) {
+  const { user } = useAuth();
   const [status, setStatus] = useState<
     "initializing" | "ready" | "active" | "paused" | "complete" | "reflection" | "encoded"
   >("initializing");
   const [timer, setTimer] = useState(0);
+  const [currentExerciseIdx, setCurrentExerciseIdx] = useState(0);
   const [currentSet, setCurrentSet] = useState(1);
   const [currentRep, setCurrentRep] = useState(0);
+
+  // Derive exercise data from props or fallback
+  const exercises: Exercise[] = workoutDay?.exercises ?? [
+    { name: "Sit Up", sets: 3, reps: "15", rest: "60s" },
+  ];
+  const currentExercise = exercises[currentExerciseIdx] ?? exercises[0];
+  const exerciseName = currentExercise?.name ?? "Exercise";
+  const targetSets = currentExercise?.sets ?? 3;
+  const targetReps = parseInt(String(currentExercise?.reps ?? "15"), 10) || 15;
+  const workoutName = workoutDay?.name ?? "Workout";
 
   // Micro-language state
   const [startMessage, setStartMessage] = useState("");
@@ -59,6 +75,7 @@ export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalPr
       setShowHesitation(false);
       hasStartedRef.current = false;
       setTimer(0);
+      setCurrentExerciseIdx(0);
       setCurrentSet(1);
       setCurrentRep(0);
 
@@ -140,8 +157,25 @@ export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalPr
       // Record completion
       recordWorkoutCompleted();
 
+      // Save workout log to Firestore
+      if (user) {
+        const logId = `log_${Date.now()}`;
+        setDocument(`users/${user.uid}/workoutLogs/${logId}`, {
+          workoutName,
+          exercises: exercises.map((ex) => ({
+            name: ex.name,
+            sets: ex.sets,
+            reps: ex.reps,
+            rest: ex.rest,
+          })),
+          duration: timer,
+          completedAt: new Date().toISOString(),
+          completionType: currentExerciseIdx >= exercises.length - 1 ? "full" : "partial",
+        }).catch(console.warn);
+      }
+
       // Determine completion type
-      const completedFull = currentSet >= 3 && currentRep >= 15;
+      const completedFull = currentExerciseIdx >= exercises.length - 1 && currentSet >= targetSets;
 
       // Set completion message
       setCompletionMessage(getRandomMessage("completion"));
@@ -156,7 +190,7 @@ export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalPr
 
   const handleReflectionSubmit = () => {
     if (reflectionText.trim()) {
-      recordReflection(reflectionText.trim(), "[02] Sit Up");
+      recordReflection(reflectionText.trim(), workoutName);
     }
     setStatus("encoded");
   };
@@ -166,11 +200,16 @@ export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalPr
   };
 
   const handleRepComplete = () => {
-    if (currentRep < 15) {
+    if (currentRep < targetReps) {
       setCurrentRep(currentRep + 1);
     } else {
-      if (currentSet < 3) {
+      if (currentSet < targetSets) {
         setCurrentSet(currentSet + 1);
+        setCurrentRep(0);
+      } else if (currentExerciseIdx < exercises.length - 1) {
+        // Advance to next exercise
+        setCurrentExerciseIdx(currentExerciseIdx + 1);
+        setCurrentSet(1);
         setCurrentRep(0);
       } else {
         handleComplete();
@@ -199,7 +238,7 @@ export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalPr
               Sequence Active
             </div>
             <div className="font-['JetBrains_Mono',monospace] text-[20px] text-[#ff6600] font-bold uppercase">
-              [02] SIT UP
+              [{String(currentExerciseIdx + 1).padStart(2, "0")}] {exerciseName}
             </div>
           </div>
           <button
@@ -417,10 +456,10 @@ export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalPr
                   </div>
                   <div className="text-center">
                     <div className="font-['JetBrains_Mono',monospace] text-[16px] text-white font-bold">
-                      {(currentSet - 1) * 15 + currentRep}
+                      {exercises.length}
                     </div>
                     <div className="font-['JetBrains_Mono',monospace] text-[7px] text-white/40 uppercase">
-                      Total Reps
+                      Exercises
                     </div>
                   </div>
                   <div className="text-center">
@@ -471,7 +510,7 @@ export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalPr
                     {currentSet}
                   </div>
                   <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase">
-                    of 3
+                    of {targetSets}
                   </div>
                 </div>
 
@@ -483,7 +522,7 @@ export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalPr
                     {currentRep}
                   </div>
                   <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase">
-                    of 15
+                    of {targetReps}
                   </div>
                 </div>
               </div>
@@ -496,11 +535,11 @@ export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalPr
                 <div className="h-3 bg-white/10 relative mb-2">
                   <div
                     className="absolute inset-y-0 left-0 bg-[#ff6600]"
-                    style={{ width: `${(currentRep / 15) * 100}%` }}
+                    style={{ width: `${(currentRep / targetReps) * 100}%` }}
                   />
                 </div>
                 <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40">
-                  {Math.round((currentRep / 15) * 100)}% COMPLETE
+                  {Math.round((currentRep / targetReps) * 100)}% COMPLETE
                 </div>
               </div>
 
@@ -511,23 +550,23 @@ export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalPr
                     Total Reps
                   </div>
                   <div className="font-['JetBrains_Mono',monospace] text-[16px] text-white font-bold">
-                    {(currentSet - 1) * 15 + currentRep}
+                    {(currentSet - 1) * targetReps + currentRep}
                   </div>
                 </div>
                 <div className="border border-white/20 p-3 text-center">
                   <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase mb-1">
-                    Avg Pace
+                    Exercise
                   </div>
                   <div className="font-['JetBrains_Mono',monospace] text-[16px] text-white font-bold">
-                    2.3s
+                    {currentExerciseIdx + 1}/{exercises.length}
                   </div>
                 </div>
                 <div className="border border-white/20 p-3 text-center">
                   <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase mb-1">
-                    Calories
+                    Elapsed
                   </div>
                   <div className="font-['JetBrains_Mono',monospace] text-[16px] text-white font-bold">
-                    48
+                    {formatTime(timer)}
                   </div>
                 </div>
               </div>
@@ -536,18 +575,14 @@ export function WorkoutSequenceModal({ isOpen, onClose }: WorkoutSequenceModalPr
               {status === "ready" && (
                 <div className="border-l-2 border-white/20 pl-4 py-2">
                   <div className="font-['JetBrains_Mono',monospace] text-[9px] text-white/60 uppercase tracking-wider mb-2">
-                    Protocol
+                    Protocol — {exercises.length} modules
                   </div>
                   <ul className="space-y-1">
-                    <li className="font-['JetBrains_Mono',monospace] text-[10px] text-white/80">
-                      · 3 sets x 15 reps
-                    </li>
-                    <li className="font-['JetBrains_Mono',monospace] text-[10px] text-white/80">
-                      · 60 sec rest between sets
-                    </li>
-                    <li className="font-['JetBrains_Mono',monospace] text-[10px] text-white/80">
-                      · Maintain form throughout
-                    </li>
+                    {exercises.map((ex, i) => (
+                      <li key={i} className="font-['JetBrains_Mono',monospace] text-[10px] text-white/80">
+                        · [{String(i + 1).padStart(2, "0")}] {ex.name} — {ex.sets}x{ex.reps} ({ex.rest} rest)
+                      </li>
+                    ))}
                   </ul>
                 </div>
               )}
