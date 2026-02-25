@@ -168,8 +168,8 @@
 
 ## Phase 4: Social Features [MEDIUM PRIORITY]
 
-- [ ] Create `src/services/challenges.ts` — CRUD for challenges collection
-- [ ] Create `src/services/squads.ts` — CRUD with invite code generation/validation
+- [x] Create `src/services/challenges.ts` — CRUD for challenges collection + join/leave + participant queries + helpers
+- [x] Create `src/services/squads.ts` — CRUD with invite code generation (SQD-XXXXXX), join by code, member management
 - [ ] Wire Challenges.tsx to Firestore (join challenge, create/join squad)
 - [ ] Wire ChallengeDetail.tsx leaderboard from real participant data
 - [ ] Wire UserProfileModal to read shared profiles
