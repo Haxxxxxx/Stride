@@ -4,6 +4,11 @@ import svgPaths from "../../imports/svg-oe8cws8da9";
 import { getAgentResponse, containsDelayLanguage, containsResetLanguage } from "../utils/agentLayer";
 import { shouldDeliverFriction } from "../utils/frictionEngine";
 import { recordAgentInteraction, recordDelayLanguage, recordResetEvent, getBehaviorState, calculateAlignmentScore } from "../utils/behaviorStore";
+import { chatCompletion, type LLMMessage } from "../../services/llm";
+import { buildSystemPrompt, getAgentWelcome, type AgentId, type AgentContext } from "../../services/agentPrompts";
+import { useAuth } from "../contexts/AuthContext";
+import { getDocument, updateDocument } from "../../services/firestore";
+import { detectMode } from "../utils/agentLayer";
 
 interface Message {
   type: 'system' | 'ai' | 'user' | 'plan' | 'friction' | 'pattern';
@@ -69,13 +74,14 @@ function EmptyCircle() {
 }
 
 export default function AIAgent() {
+  const { user } = useAuth();
   const [input, setInput] = useState("");
-  const [currentAgent, setCurrentAgent] = useState<Agent>(() => {
-    const saved = localStorage.getItem('trainingAgent');
-    return (saved as Agent) || "atlas";
-  });
+  const [isThinking, setIsThinking] = useState(false);
+  const [currentAgent, setCurrentAgent] = useState<Agent>("atlas");
   const [showAgentModal, setShowAgentModal] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<Agent>(currentAgent);
+  const [userProfile, setUserProfile] = useState<AgentContext["userProfile"]>(null);
+  const [conversationHistory, setConversationHistory] = useState<LLMMessage[]>([]);
   const [messages, setMessages] = useState<Message[]>([
     {
       type: "system",
@@ -84,12 +90,13 @@ export default function AIAgent() {
     },
     {
       type: "ai",
-      text: "Training protocol analysis complete. Six-day operational streak detected. System recommends calibration adjustment for optimal performance sustainability.",
+      text: "Initializing agent...",
       timestamp: "09:41"
     }
   ]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const initRef = useRef(false);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -99,27 +106,61 @@ export default function AIAgent() {
     scrollToBottom();
   }, [messages]);
 
-  // Calculate alignment score on mount
+  // Load agent + profile from Firestore on mount
   useEffect(() => {
+    if (!user || initRef.current) return;
+    initRef.current = true;
+
     calculateAlignmentScore();
-  }, []);
+
+    const loadProfile = async () => {
+      try {
+        const data = await getDocument<Record<string, unknown>>(`users/${user.uid}/personalization/data`);
+        if (data) {
+          setUserProfile({
+            optimizationGoal: data.optimizationGoal as string,
+            experience: data.experience as string,
+            constraints: data.constraints as string[],
+            sessionTime: data.sessionTime as string,
+            trainingFocuses: data.trainingFocuses as string[],
+            equipmentAccess: data.equipmentAccess as string,
+          });
+          if (data.selectedAgent) {
+            const agent = data.selectedAgent as Agent;
+            setCurrentAgent(agent);
+            setSelectedAgent(agent);
+            // Set welcome message from actual agent
+            setMessages([
+              { type: "system", text: "COMMAND CHANNEL ESTABLISHED", timestamp: getTimestamp() },
+              { type: "ai", text: getAgentWelcome(agent), timestamp: getTimestamp() },
+            ]);
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to load personalization:", err);
+      }
+    };
+
+    loadProfile();
+  }, [user]);
 
   const getTimestamp = () => {
     return new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   };
 
-  const handleSend = () => {
-    if (!input.trim()) return;
-    
+  const handleSend = async () => {
+    if (!input.trim() || isThinking) return;
+
     const userMessage: Message = {
       type: "user",
       text: input,
       timestamp: getTimestamp()
     };
-    
+
     setMessages(prev => [...prev, userMessage]);
     const userInput = input;
     setInput("");
+    setIsThinking(true);
 
     // Record agent interaction
     recordAgentInteraction();
@@ -132,76 +173,97 @@ export default function AIAgent() {
       recordResetEvent();
     }
 
-    // Simulate AI response with agent layer integration
-    setTimeout(() => {
-      const lowerInput = userInput.toLowerCase();
-      let aiResponse: Message;
+    try {
+      // Detect conversation mode from the input
+      const mode = detectMode(userInput);
+      const behaviorState = getBehaviorState();
 
-      // First: check if plan-type response is needed
-      if (lowerInput.includes('adjust') || lowerInput.includes('plan') || lowerInput.includes('recalibrate')) {
-        aiResponse = {
-          type: "plan",
-          text: "Protocol recalibration initiated. Next operation sequence generated based on current performance metrics and recovery status.",
-          timestamp: getTimestamp(),
-          planData: {
-            exercises: [
-              { name: "Push-Up Module", sets: 4, reps: 15, rest: "60s" },
-              { name: "Squat Protocol", sets: 4, reps: 20, rest: "90s" },
-              { name: "Plank Hold", sets: 3, reps: 45, rest: "60s" },
-              { name: "Burpee Sequence", sets: 3, reps: 12, rest: "120s" }
-            ]
-          }
-        };
-      } else if (lowerInput.includes('streak') || lowerInput.includes('check') || lowerInput.includes('status')) {
-        const state = getBehaviorState();
-        aiResponse = {
-          type: "ai",
-          text: `Current operational streak: ${state.streakDays} days. Alignment score: ${state.alignmentScore}. Completion rate: ${Math.round((state.workoutsCompletedThisWeek / Math.max(state.workoutsCompletedThisWeek + state.workoutsSkippedThisWeek, 1)) * 100)}%. Performance trajectory: ${state.alignmentScore >= 75 ? 'Ascending' : 'Requires attention'}.`,
-          timestamp: getTimestamp()
-        };
-      } else if (lowerInput.includes('pain') || lowerInput.includes('injury')) {
-        aiResponse = {
-          type: "ai",
-          text: "Pain indicator flagged. Suspending current protocol. Recommend consultation with medical operator. Alternative low-impact sequences available upon request.",
-          timestamp: getTimestamp()
-        };
-      } else {
-        // Use the agent conversational layer
-        const { mode, response } = getAgentResponse(userInput);
-        aiResponse = {
-          type: mode === "patternReflection" ? "pattern" : "ai",
-          text: response,
-          timestamp: getTimestamp(),
-          mode: mode
-        };
-      }
-      
+      // Check friction eligibility
+      const frictionDecision = shouldDeliverFriction();
+
+      // Build system prompt with full context
+      const context: AgentContext = {
+        behaviorState,
+        userProfile,
+        conversationMode: mode,
+        frictionFlag: frictionDecision.eligible ? frictionDecision.flag : undefined,
+      };
+      const systemPrompt = buildSystemPrompt(currentAgent as AgentId, context);
+
+      // Build messages for LLM
+      const llmMessages: LLMMessage[] = [
+        { role: "system", content: systemPrompt },
+        ...conversationHistory.slice(-20),
+        { role: "user", content: userInput },
+      ];
+
+      // Try LLM call
+      const response = await chatCompletion(llmMessages, { temperature: 0.8, maxTokens: 256 });
+
+      // Update conversation history
+      setConversationHistory(prev => [
+        ...prev.slice(-18),
+        { role: "user" as const, content: userInput },
+        { role: "assistant" as const, content: response },
+      ]);
+
+      const aiResponse: Message = {
+        type: mode === "patternReflection" ? "pattern" : "ai",
+        text: response,
+        timestamp: getTimestamp(),
+        mode,
+      };
       setMessages(prev => [...prev, aiResponse]);
 
-      // Check if friction should be delivered (10-15% of eligible cases)
-      setTimeout(() => {
-        const frictionDecision = shouldDeliverFriction();
-        if (frictionDecision.eligible) {
+      // Deliver friction as separate message if eligible
+      if (frictionDecision.eligible) {
+        setTimeout(() => {
           const frictionMessage: Message = {
             type: "friction",
             text: frictionDecision.response,
             timestamp: getTimestamp(),
-            mode: `friction:${frictionDecision.flag}`
+            mode: `friction:${frictionDecision.flag}`,
           };
           setMessages(prev => [...prev, frictionMessage]);
 
-          // If friction routes to a different agent, note it
           if (frictionDecision.agent !== currentAgent) {
             const routingMessage: Message = {
               type: "system",
               text: `ROUTING: ${agentData[frictionDecision.agent].name} — ${agentData[frictionDecision.agent].title}`,
-              timestamp: getTimestamp()
+              timestamp: getTimestamp(),
             };
             setMessages(prev => [...prev, routingMessage]);
           }
-        }
-      }, 1200);
-    }, 800);
+        }, 800);
+      }
+    } catch (err) {
+      console.warn("[AIAgent] LLM failed, falling back to agentLayer:", err);
+
+      // Fallback to template-based agentLayer
+      const { mode, response } = getAgentResponse(userInput);
+      const aiResponse: Message = {
+        type: mode === "patternReflection" ? "pattern" : "ai",
+        text: response,
+        timestamp: getTimestamp(),
+        mode,
+      };
+      setMessages(prev => [...prev, aiResponse]);
+
+      // Still check friction on fallback
+      const frictionDecision = shouldDeliverFriction();
+      if (frictionDecision.eligible) {
+        setTimeout(() => {
+          setMessages(prev => [...prev, {
+            type: "friction",
+            text: frictionDecision.response,
+            timestamp: getTimestamp(),
+            mode: `friction:${frictionDecision.flag}`,
+          }]);
+        }, 800);
+      }
+    } finally {
+      setIsThinking(false);
+    }
   };
 
   const handleQuickCommand = (command: string) => {
@@ -215,8 +277,19 @@ export default function AIAgent() {
 
   const confirmAgentChange = () => {
     setCurrentAgent(selectedAgent);
-    localStorage.setItem('trainingAgent', selectedAgent);
     setShowAgentModal(false);
+    // Clear conversation history on agent switch
+    setConversationHistory([]);
+    // Add system message for agent switch
+    setMessages(prev => [
+      ...prev,
+      { type: "system", text: `AGENT SWITCHED: ${agentData[selectedAgent].name} — ${agentData[selectedAgent].title}`, timestamp: getTimestamp() },
+      { type: "ai", text: getAgentWelcome(selectedAgent), timestamp: getTimestamp() },
+    ]);
+    // Persist to Firestore
+    if (user) {
+      updateDocument(`users/${user.uid}/personalization/data`, { selectedAgent }).catch(console.warn);
+    }
   };
 
   return (
@@ -353,6 +426,19 @@ export default function AIAgent() {
             )}
           </div>
         ))}
+        {/* Thinking indicator */}
+        {isThinking && (
+          <div className="mr-6">
+            <div className="border border-white/20 p-3">
+              <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wider mb-2">
+                {getTimestamp()} • AGENT
+              </div>
+              <div className="font-['JetBrains_Mono',monospace] text-[10px] text-[#ff6600] animate-pulse">
+                Processing...
+              </div>
+            </div>
+          </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
 
@@ -390,7 +476,7 @@ export default function AIAgent() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && handleSend()}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSend(); } }}
             placeholder="Enter command..."
             className="flex-1 bg-transparent font-['JetBrains_Mono',monospace] text-[11px] text-white outline-none placeholder:text-white/40"
           />

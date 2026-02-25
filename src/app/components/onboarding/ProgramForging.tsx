@@ -4,28 +4,41 @@ import svgPaths from "../../../imports/svg-v0sj4hk01y";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { useAuth } from "../../contexts/AuthContext";
 import { setDocument, updateDocument } from "../../../services/firestore";
+import { generateProgram, type PersonalizationData } from "../../../services/programGenerator";
+
+type Stage = "saving" | "generating" | "storing" | "done" | "error";
+
+const STAGE_LABELS: Record<Stage, string> = {
+  saving: "Saving operator profile...",
+  generating: "Generating training program...",
+  storing: "Storing program data...",
+  done: "Program forged.",
+  error: "Generation failed.",
+};
 
 export default function ProgramForging() {
   const navigate = useNavigate();
   const [progress, setProgress] = useState(0);
+  const [stage, setStage] = useState<Stage>("saving");
+  const [error, setError] = useState<string | null>(null);
   const store = useOnboardingStore();
   const { user } = useAuth();
-  const savedRef = useRef(false);
+  const startedRef = useRef(false);
 
-  // Save all onboarding data to Firestore when this screen mounts
+  // Run the full pipeline: save profile → generate program → store program
   useEffect(() => {
-    if (savedRef.current || !user) return;
-    savedRef.current = true;
+    if (startedRef.current || !user) return;
+    startedRef.current = true;
 
-    const saveOnboardingData = async () => {
+    const run = async () => {
       try {
-        // Save personalization data
-        await setDocument(`users/${user.uid}/personalization/data`, {
+        // Stage 1: Save personalization (0-30%)
+        setStage("saving");
+        animateProgress(0, 30, 800);
+
+        const personalization: PersonalizationData = {
           bodyProfile: store.bodyProfile,
           optimizationGoal: store.optimizationGoal,
-          height: store.height,
-          weight: store.weight,
-          goalWeight: store.goalWeight,
           constraints: store.constraints,
           sessionTime: store.sessionTime,
           experience: store.experience,
@@ -33,44 +46,76 @@ export default function ProgramForging() {
           sportFocus: store.sportFocus,
           equipmentAccess: store.equipmentAccess,
           gymAccess: store.gymAccess,
+        };
+
+        await setDocument(`users/${user.uid}/personalization/data`, {
+          ...personalization,
+          height: store.height,
+          weight: store.weight,
+          goalWeight: store.goalWeight,
           selectedAgent: store.selectedAgent,
         });
 
-        // Mark onboarding as complete
         await updateDocument(`users/${user.uid}`, {
           onboardingComplete: true,
         });
 
-        // Clear the store after successful save
         store.reset();
+
+        // Stage 2: Generate program via LLM (30-80%)
+        setStage("generating");
+        animateProgress(30, 75, 2000);
+
+        const program = await generateProgram(personalization);
+
+        // Stage 3: Store program in Firestore (80-100%)
+        setStage("storing");
+        animateProgress(75, 95, 500);
+
+        const programId = `program_${Date.now()}`;
+        await setDocument(`users/${user.uid}/programs/${programId}`, {
+          ...program,
+          active: true,
+          createdAt: new Date().toISOString(),
+        });
+
+        // Done
+        setStage("done");
+        setProgress(100);
       } catch (err) {
-        console.error("Failed to save onboarding data:", err);
+        console.error("Program forging failed:", err);
+        setStage("error");
+        setError(err instanceof Error ? err.message : "Unknown error");
       }
     };
 
-    saveOnboardingData();
+    run();
   }, [user]);
 
-  useEffect(() => {
+  // Smooth progress animation helper
+  const animateProgress = (from: number, to: number, durationMs: number) => {
+    const steps = Math.ceil(durationMs / 50);
+    const increment = (to - from) / steps;
+    let current = from;
+    let step = 0;
+
     const interval = setInterval(() => {
-      setProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          return 100;
-        }
-        return prev + 2;
-      });
+      step++;
+      current = Math.min(from + increment * step, to);
+      setProgress(current);
+      if (step >= steps) clearInterval(interval);
     }, 50);
+  };
 
-    const timeout = setTimeout(() => {
-      navigate("/app");
-    }, 3500);
-
-    return () => {
-      clearInterval(interval);
-      clearTimeout(timeout);
-    };
-  }, [navigate]);
+  const handleRetry = () => {
+    startedRef.current = false;
+    setProgress(0);
+    setStage("saving");
+    setError(null);
+    // Re-trigger by forcing re-render (the effect checks startedRef)
+    startedRef.current = false;
+    window.location.reload();
+  };
 
   return (
     <div className="relative size-full bg-black flex items-center justify-center overflow-hidden">
@@ -112,7 +157,7 @@ export default function ProgramForging() {
               cy="116"
               r="110"
               fill="none"
-              stroke="#ff6600"
+              stroke={stage === "error" ? "#ff3333" : "#ff6600"}
               strokeWidth="12"
               strokeLinecap="round"
               strokeDasharray={`${2 * Math.PI * 110}`}
@@ -128,16 +173,30 @@ export default function ProgramForging() {
           </div>
         </div>
 
-        {/* Description */}
+        {/* Stage Label */}
         <div className="text-center max-w-[280px]">
           <p className="font-['JetBrains_Mono',monospace] text-[13px] text-white/80 leading-relaxed">
-            FORGE creates a personalized training plan based on your profile, activity level, and
-            goals.
+            {STAGE_LABELS[stage]}
           </p>
+          {stage === "error" && error && (
+            <p className="font-['JetBrains_Mono',monospace] text-[10px] text-white/40 mt-2">
+              {error}
+            </p>
+          )}
         </div>
 
-        {/* Start Training Button (shown when complete) */}
-        {progress >= 100 && (
+        {/* Error: Retry Button */}
+        {stage === "error" && (
+          <button
+            onClick={handleRetry}
+            className="mt-8 w-full border-2 border-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[11px] text-[#ff6600] font-bold uppercase tracking-wider hover:bg-[#ff6600]/10 transition-colors"
+          >
+            Retry Generation
+          </button>
+        )}
+
+        {/* Success: Start Training Button */}
+        {stage === "done" && (
           <button
             onClick={() => navigate("/app")}
             className="mt-12 w-full bg-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[11px] text-black font-bold uppercase tracking-wider hover:bg-[#ff8833] transition-colors border-2 border-[#ff6600]"
