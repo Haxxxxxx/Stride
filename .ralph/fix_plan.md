@@ -156,11 +156,13 @@
 - [x] ShareableProgressCard reads real data from behaviorStore + callsign from Firestore
 - [x] Dynamic date in share card footer
 
-### 3.6 Wire Notifications
-- [ ] Query `users/{uid}/notifications` ordered by createdAt desc
-- [ ] Wire Mark All Read / Clear Read buttons
-- [ ] Wire filter tabs by notification type
-- [ ] Show empty state for new users
+### 3.6 Wire Notifications — DONE
+- [x] Query `users/{uid}/notifications` ordered by createdAt desc
+- [x] Wire Mark All Read / Clear Read buttons (batch updateDocument / deleteDocument)
+- [x] Wire filter tabs by notification type (All, Unread, System, Challenges)
+- [x] Show empty state for new users
+- [x] Click-to-mark-read on individual notifications
+- [x] Firestore timestamp → relative time display (timeAgo helper)
 
 ---
 
