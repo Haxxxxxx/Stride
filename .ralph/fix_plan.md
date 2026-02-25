@@ -171,8 +171,8 @@
 - [x] Create `src/services/challenges.ts` — CRUD for challenges collection + join/leave + participant queries + helpers
 - [x] Create `src/services/squads.ts` — CRUD with invite code generation (SQD-XXXXXX), join by code, member management
 - [x] Wire Challenges.tsx to Firestore (join challenge, create/join squad, live data loading, empty states)
-- [ ] Wire ChallengeDetail.tsx leaderboard from real participant data
-- [ ] Wire UserProfileModal to read shared profiles
+- [x] Wire ChallengeDetail.tsx leaderboard from real participant data (Firestore query, route params, user progress from behaviorStore)
+- [x] Wire UserProfileModal to read shared profiles (behaviorState + recent workout logs from Firestore)
 - [x] Create `src/services/notifications.ts` — notification creation helper with typed triggers
 - [x] Add notification triggers: workout complete (WorkoutSequenceModal), streak milestone (behaviorStore), challenge joined (Challenges), squad joined (Challenges), program generated (ProgramForging)
 
