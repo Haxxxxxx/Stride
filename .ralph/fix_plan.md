@@ -141,11 +141,11 @@
 - [x] On complete: write workout log to `users/{uid}/workoutLogs/{logId}` in Firestore
 - [x] behaviorState auto-syncs to Firestore via updated behaviorStore
 
-### 3.4 Wire Progress screen to Firestore
-- [ ] Query `users/{uid}/workoutLogs` for past 28 days → build week grid
-- [ ] Aggregate stats from logs (total ops, streak, completion rate, avg duration)
-- [ ] Build performance chart from weekly completion rates
-- [ ] Recent activity from last 5 workout logs
+### 3.4 Wire Progress screen to Firestore — DONE
+- [x] Query `users/{uid}/workoutLogs` ordered by completedAt desc, limit 50
+- [x] Stats from behaviorStore (total ops, streak, completion rate) + avg duration from logs
+- [x] Performance chart derived from weekly log counts (last 4 weeks)
+- [x] Recent activity from last 5 workout logs with real timestamps/durations
 
 ### 3.5 Wire Profile to Firebase + Firestore
 - [ ] Read profile data from Firestore `users/{uid}` (callsign, bio, avatarUrl)

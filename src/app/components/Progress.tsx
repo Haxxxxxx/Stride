@@ -1,7 +1,19 @@
 import { Link } from "react-router";
 import svgPaths from "../../imports/svg-2gts8wf65t";
 import { CircularProgress } from "./CircularProgress";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useAuth } from "../contexts/AuthContext";
+import { queryCollection, orderBy, limit } from "../../services/firestore";
+import { getBehaviorState } from "../utils/behaviorStore";
+
+interface WorkoutLog {
+  id: string;
+  workoutName: string;
+  duration: number;
+  completedAt: string;
+  completionType: string;
+  exercises: Array<{ name: string; sets: number; reps: string; rest: string }>;
+}
 
 function Header() {
   return (
@@ -193,12 +205,17 @@ function WeeklyGrid() {
   );
 }
 
-function Stats() {
+function Stats({ avgDuration }: { avgDuration: number }) {
+  const state = getBehaviorState();
+  const completionRate = Math.round(
+    (state.workoutsCompletedThisWeek / Math.max(state.workoutsCompletedThisWeek + state.workoutsSkippedThisWeek, 1)) * 100
+  );
+
   const stats = [
-    { label: "Total Operations", value: "168", change: "+12" },
-    { label: "Active Streak", value: "6 Days", change: "Current" },
-    { label: "Completion Rate", value: "94%", change: "+3%" },
-    { label: "Avg Duration", value: "68 min", change: "-5 min" },
+    { label: "Total Operations", value: String(state.totalWorkoutsCompleted), change: `This week: ${state.workoutsCompletedThisWeek}` },
+    { label: "Active Streak", value: `${state.streakDays} Days`, change: "Current" },
+    { label: "Completion Rate", value: `${completionRate}%`, change: `Alignment: ${state.alignmentScore}` },
+    { label: "Avg Duration", value: avgDuration > 0 ? `${Math.round(avgDuration / 60)} min` : "--", change: "Per session" },
   ];
 
   return (
@@ -211,9 +228,7 @@ function Stats() {
           <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold mb-1">
             {stat.value}
           </div>
-          <div className={`font-['JetBrains_Mono',monospace] text-[8px] uppercase tracking-wide ${
-            stat.change.includes('+') || stat.change === 'Current' ? 'text-[#ff6600]' : 'text-white/40'
-          }`}>
+          <div className="font-['JetBrains_Mono',monospace] text-[8px] uppercase tracking-wide text-[#ff6600]">
             {stat.change}
           </div>
         </div>
@@ -222,13 +237,21 @@ function Stats() {
   );
 }
 
-function PerformanceChart() {
-  const data = [
-    { week: "W1", value: 85 },
-    { week: "W2", value: 92 },
-    { week: "W3", value: 88 },
-    { week: "W4", value: 94 },
-  ];
+function PerformanceChart({ logs }: { logs: WorkoutLog[] }) {
+  // Derive weekly completion counts from logs (last 4 weeks)
+  const now = Date.now();
+  const weekMs = 7 * 24 * 60 * 60 * 1000;
+  const data = [1, 2, 3, 4].map((weeksAgo) => {
+    const start = now - weeksAgo * weekMs;
+    const end = now - (weeksAgo - 1) * weekMs;
+    const count = logs.filter((l) => {
+      const t = new Date(l.completedAt).getTime();
+      return t >= start && t < end;
+    }).length;
+    // Normalize: assume 5 sessions/week = 100%
+    const value = Math.min(Math.round((count / 5) * 100), 100);
+    return { week: `W${5 - weeksAgo}`, value: value || (logs.length === 0 ? 0 : 5) };
+  }).reverse();
 
   return (
     <div className="border border-white/20 p-5 mb-6">
@@ -265,48 +288,67 @@ function PerformanceChart() {
   );
 }
 
-function RecentActivity() {
-  const activities = [
-    { date: "2026.02.09", time: "14:30", op: "Jump Squat", status: "complete" },
-    { date: "2026.02.09", time: "09:15", op: "Morning Run", status: "complete" },
-    { date: "2026.02.08", time: "18:00", op: "Core Training", status: "complete" },
-    { date: "2026.02.08", time: "10:30", op: "Strength Block", status: "complete" },
-    { date: "2026.02.07", time: "16:45", op: "Cardio Cycle", status: "complete" },
-  ];
-
+function RecentActivity({ logs }: { logs: WorkoutLog[] }) {
   return (
     <div className="border border-white/20 p-5">
       <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/60 uppercase tracking-[2px] mb-4">
         Recent Activity Log
       </div>
-      
-      <div className="space-y-2">
-        {activities.map((activity, idx) => (
-          <div key={idx} className="flex items-center justify-between border-l-2 border-white/20 pl-3 py-2">
-            <div>
-              <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white">
-                {activity.op}
+
+      {logs.length === 0 ? (
+        <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/30">
+          No activity recorded yet.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {logs.map((log) => {
+            const d = new Date(log.completedAt);
+            const date = d.toISOString().split("T")[0].replace(/-/g, ".");
+            const time = d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+            return (
+              <div key={log.id} className="flex items-center justify-between border-l-2 border-white/20 pl-3 py-2">
+                <div>
+                  <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white">
+                    {log.workoutName}
+                  </div>
+                  <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40">
+                    {date} · {time} · {log.duration > 0 ? `${Math.round(log.duration / 60)}m` : "--"}
+                  </div>
+                </div>
+                <div className={`size-2 ${log.completionType === "full" ? "bg-[#ff6600]" : "bg-white"}`} />
               </div>
-              <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40">
-                {activity.date} · {activity.time}
-              </div>
-            </div>
-            <div className="size-2 bg-white" />
-          </div>
-        ))}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
 export default function Progress() {
+  const { user } = useAuth();
+  const [logs, setLogs] = useState<WorkoutLog[]>([]);
+
+  useEffect(() => {
+    if (!user) return;
+    queryCollection<WorkoutLog>(
+      `users/${user.uid}/workoutLogs`,
+      [orderBy("completedAt", "desc"), limit(50)]
+    ).then(setLogs).catch(console.warn);
+  }, [user]);
+
+  const recentLogs = logs.slice(0, 5);
+  const avgDuration = logs.length > 0
+    ? logs.reduce((sum, l) => sum + (l.duration || 0), 0) / logs.length
+    : 0;
+
   return (
     <div className="w-full p-6 pb-24">
       <Header />
       <WeeklyGrid />
-      <Stats />
-      <PerformanceChart />
-      <RecentActivity />
+      <Stats avgDuration={avgDuration} />
+      <PerformanceChart logs={logs} />
+      <RecentActivity logs={recentLogs} />
     </div>
   );
 }
