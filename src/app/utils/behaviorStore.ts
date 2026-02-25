@@ -1,5 +1,8 @@
 // STRIDE Behavioral State Store
 // Tracks all user behavioral signals for the psychological architecture layers
+// localStorage is the primary cache; Firestore is the persistence layer
+
+import { getDocument, setDocument } from "../../services/firestore";
 
 export interface BehaviorState {
   // Session tracking
@@ -78,14 +81,14 @@ export interface BehaviorState {
 const DEFAULT_STATE: BehaviorState = {
   lastLoginTimestamp: 0,
   sessionCount: 0,
-  workoutsCompletedThisWeek: 4,
+  workoutsCompletedThisWeek: 0,
   workoutsSkippedThisWeek: 0,
-  workoutsCompleted14d: 8,
-  workoutsSkipped14d: 1,
-  totalWorkoutsCompleted: 168,
-  streakDays: 6,
-  previousStreakDays: 6,
-  streakBreaks: 1,
+  workoutsCompleted14d: 0,
+  workoutsSkipped14d: 0,
+  totalWorkoutsCompleted: 0,
+  streakDays: 0,
+  previousStreakDays: 0,
+  streakBreaks: 0,
   lastStreakMilestone: 0,
   hesitationEvents7d: 0,
   lastHesitationTimestamp: 0,
@@ -114,11 +117,19 @@ const DEFAULT_STATE: BehaviorState = {
   lastWorkoutSkippedAt: 0,
   consecutiveMissedSessions: 0,
   reflections: [],
-  alignmentScore: 82,
+  alignmentScore: 50,
   lastAlignmentCalculation: 0,
 };
 
 const STORE_KEY = "stride_behavior_state";
+
+// UID of the currently authenticated user (set via setAuthUid)
+let _authUid: string | null = null;
+
+/** Call once on auth state change to enable/disable Firestore sync */
+export function setAuthUid(uid: string | null): void {
+  _authUid = uid;
+}
 
 export function getBehaviorState(): BehaviorState {
   try {
@@ -136,8 +147,45 @@ export function updateBehaviorState(updates: Partial<BehaviorState>): BehaviorSt
   const current = getBehaviorState();
   const next = { ...current, ...updates };
   localStorage.setItem(STORE_KEY, JSON.stringify(next));
+
+  // Fire-and-forget Firestore sync if authenticated
+  if (_authUid) {
+    syncToFirestore(_authUid).catch(() => {
+      // Silent fail — localStorage is the fallback
+    });
+  }
+
   return next;
 }
+
+// ============================================================
+// Firestore Sync
+// ============================================================
+
+/** Fetch behavior state from Firestore and merge into localStorage */
+export async function syncFromFirestore(uid: string): Promise<BehaviorState> {
+  const remote = await getDocument<Partial<BehaviorState>>(`users/${uid}/behaviorState/data`);
+  if (remote) {
+    const merged = { ...DEFAULT_STATE, ...remote };
+    localStorage.setItem(STORE_KEY, JSON.stringify(merged));
+    return merged;
+  }
+  // No remote data — push local state to Firestore as initial seed
+  const local = getBehaviorState();
+  await syncToFirestore(uid);
+  return local;
+}
+
+/** Write current localStorage state to Firestore */
+export async function syncToFirestore(uid: string): Promise<void> {
+  const state = getBehaviorState();
+  // Strip non-serializable/transient fields if any, then write
+  await setDocument(`users/${uid}/behaviorState/data`, { ...state });
+}
+
+// ============================================================
+// Mutation helpers (unchanged API, now with auto-sync)
+// ============================================================
 
 export function recordLogin(): BehaviorState {
   const state = getBehaviorState();

@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { User } from "firebase/auth";
 import { onAuthChange } from "../../services/auth";
+import { setAuthUid, syncFromFirestore } from "../utils/behaviorStore";
 
 interface AuthContextValue {
   user: User | null;
@@ -17,6 +18,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const unsubscribe = onAuthChange((u) => {
       setUser(u);
       setLoading(false);
+
+      // Wire behaviorStore to Firestore sync
+      setAuthUid(u?.uid ?? null);
+      if (u) {
+        syncFromFirestore(u.uid).catch(console.warn);
+      }
     });
     return unsubscribe;
   }, []);

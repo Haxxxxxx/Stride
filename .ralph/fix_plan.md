@@ -116,13 +116,14 @@
 
 ## Phase 3: Data Layer [MEDIUM PRIORITY]
 
-### 3.1 Migrate behaviorStore to Firestore
-- [ ] Update `src/app/utils/behaviorStore.ts`:
-  - **Fix default values**: `totalWorkoutsCompleted: 0, streakDays: 0, workoutsCompletedThisWeek: 0, alignmentScore: 50` (NOT 168/6/4/82)
-  - Add `async syncFromFirestore(uid: string)` — fetch `users/{uid}/behaviorState`, merge into local state
-  - Add `async syncToFirestore(uid: string)` — write current state to `users/{uid}/behaviorState`
-  - After every mutation (recordWorkoutCompleted, etc.), call `syncToFirestore` if user is authenticated
-  - On app startup in `AuthContext` or `ProtectedRoute`, call `syncFromFirestore` once
+### 3.1 Migrate behaviorStore to Firestore — DONE
+- [x] Update `src/app/utils/behaviorStore.ts`:
+  - **Fixed default values**: all zeros, alignmentScore: 50
+  - Added `syncFromFirestore(uid)` — fetches `users/{uid}/behaviorState/data`, merges into localStorage
+  - Added `syncToFirestore(uid)` — writes current state to Firestore
+  - `updateBehaviorState()` auto-syncs to Firestore when `_authUid` is set
+  - `setAuthUid()` called from AuthContext on auth state change
+  - `syncFromFirestore()` called once on login in AuthContext
 
 ### 3.2 Wire Dashboard to live data
 - [ ] In `Dashboard.tsx`:
@@ -218,6 +219,9 @@
 - [x] ProgramForging.tsx wired to generate + save program to Firestore
 - [x] Agent switching persists to Firestore
 - [x] Build passes after Phase 2: `npm run build` — 0 errors
+- [x] behaviorStore migrated to Firestore sync with localStorage cache
+- [x] Default values fixed (zeros instead of fake data)
+- [x] AuthContext wired to sync behaviorState on login
 
 ## Notes
 - The UI is COMPLETE from Figma — do not redesign, only wire to live data
