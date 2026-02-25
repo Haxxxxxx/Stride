@@ -1,7 +1,6 @@
-import { useState } from "react";
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { getTotalSteps, getCurrentStepNumber } from "../../../utils/onboardingSteps";
+import { useOnboardingStore, getTotalSteps, getCurrentStepNumber } from "../../../../stores/onboardingStore";
 
 type Focus = "strength" | "cardio" | "mobility" | "sport";
 
@@ -13,7 +12,9 @@ interface FocusOption {
 
 export default function Step9TrainingFocuses() {
   const navigate = useNavigate();
-  const [selectedFocuses, setSelectedFocuses] = useState<Focus[]>([]);
+  const store = useOnboardingStore();
+  const selectedFocuses = store.trainingFocuses;
+  const setSelectedFocuses = store.setTrainingFocuses;
 
   const options: FocusOption[] = [
     {
@@ -58,11 +59,7 @@ export default function Step9TrainingFocuses() {
 
   const handleContinue = () => {
     if (selectedFocuses.length >= 2) {
-      // Store whether sport was selected
       const hasSport = selectedFocuses.includes('sport');
-      localStorage.setItem('hasSportFocus', hasSport.toString());
-      
-      // Navigate to sport selection if sport was chosen, otherwise equipment
       if (hasSport) {
         navigate("/onboarding/personalize/sport");
       } else {
@@ -73,8 +70,8 @@ export default function Step9TrainingFocuses() {
 
   return (
     <PersonalizationLayout
-      step={getCurrentStepNumber(9)}
-      totalSteps={getTotalSteps()}
+      step={getCurrentStepNumber(9, store)}
+      totalSteps={getTotalSteps(store)}
       title="Choose Your Training Focuses"
       subtitle="Select 2-3 focuses in order of importance."
       onContinue={handleContinue}

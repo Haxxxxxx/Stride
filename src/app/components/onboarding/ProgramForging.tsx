@@ -1,13 +1,57 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router";
 import svgPaths from "../../../imports/svg-v0sj4hk01y";
+import { useOnboardingStore } from "../../../stores/onboardingStore";
+import { useAuth } from "../../contexts/AuthContext";
+import { setDocument, updateDocument } from "../../../services/firestore";
 
 export default function ProgramForging() {
   const navigate = useNavigate();
   const [progress, setProgress] = useState(0);
+  const store = useOnboardingStore();
+  const { user } = useAuth();
+  const savedRef = useRef(false);
+
+  // Save all onboarding data to Firestore when this screen mounts
+  useEffect(() => {
+    if (savedRef.current || !user) return;
+    savedRef.current = true;
+
+    const saveOnboardingData = async () => {
+      try {
+        // Save personalization data
+        await setDocument(`users/${user.uid}/personalization/data`, {
+          bodyProfile: store.bodyProfile,
+          optimizationGoal: store.optimizationGoal,
+          height: store.height,
+          weight: store.weight,
+          goalWeight: store.goalWeight,
+          constraints: store.constraints,
+          sessionTime: store.sessionTime,
+          experience: store.experience,
+          trainingFocuses: store.trainingFocuses,
+          sportFocus: store.sportFocus,
+          equipmentAccess: store.equipmentAccess,
+          gymAccess: store.gymAccess,
+          selectedAgent: store.selectedAgent,
+        });
+
+        // Mark onboarding as complete
+        await updateDocument(`users/${user.uid}`, {
+          onboardingComplete: true,
+        });
+
+        // Clear the store after successful save
+        store.reset();
+      } catch (err) {
+        console.error("Failed to save onboarding data:", err);
+      }
+    };
+
+    saveOnboardingData();
+  }, [user]);
 
   useEffect(() => {
-    // Simulate progress animation
     const interval = setInterval(() => {
       setProgress((prev) => {
         if (prev >= 100) {
@@ -18,7 +62,6 @@ export default function ProgramForging() {
       });
     }, 50);
 
-    // Auto-navigate to dashboard after completion
     const timeout = setTimeout(() => {
       navigate("/app");
     }, 3500);

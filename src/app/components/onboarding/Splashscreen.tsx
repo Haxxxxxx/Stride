@@ -12,13 +12,15 @@ export default function Splashscreen() {
         backgroundSize: '100% 4px'
       }} />
 
-      {/* Dev Bypass Button */}
-      <button
-        onClick={() => navigate('/app')}
-        className="absolute top-4 right-4 z-50 border border-white/20 px-3 py-1 font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase hover:border-[#ff6600] hover:text-[#ff6600] transition-colors"
-      >
-        Dev Bypass →
-      </button>
+      {/* Dev Bypass Button — only visible in development */}
+      {import.meta.env.DEV && (
+        <button
+          onClick={() => navigate('/app')}
+          className="absolute top-4 right-4 z-50 border border-white/20 px-3 py-1 font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase hover:border-[#ff6600] hover:text-[#ff6600] transition-colors"
+        >
+          Dev Bypass →
+        </button>
+      )}
 
       <div className="relative z-10 flex flex-col items-center justify-center gap-12 p-6">
         {/* Logo */}

@@ -1,12 +1,12 @@
-import { useState } from "react";
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
+import { useOnboardingStore, type OnboardingState } from "../../../../stores/onboardingStore";
 
-type OptimizationGoal = "fat-loss" | "general-conditioning" | "strength" | "hypertrophy";
+type OptimizationGoal = NonNullable<OnboardingState["optimizationGoal"]>;
 
 export default function Step2Optimization() {
   const navigate = useNavigate();
-  const [selected, setSelected] = useState<OptimizationGoal | null>(null);
+  const { optimizationGoal: selected, setOptimizationGoal: setSelected } = useOnboardingStore();
 
   const options: { value: OptimizationGoal; label: string }[] = [
     { value: "fat-loss", label: "Fat Loss" },
@@ -17,8 +17,6 @@ export default function Step2Optimization() {
 
   const handleContinue = () => {
     if (selected) {
-      // Store the optimization goal for conditional navigation later
-      localStorage.setItem('optimizationGoal', selected);
       navigate('/onboarding/personalize/3');
     }
   };

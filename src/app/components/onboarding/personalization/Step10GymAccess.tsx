@@ -1,13 +1,14 @@
-import { useState } from "react";
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { getTotalSteps, getCurrentStepNumber } from "../../../utils/onboardingSteps";
+import { useOnboardingStore, getTotalSteps, getCurrentStepNumber } from "../../../../stores/onboardingStore";
 
 type GymAccess = "commercial" | "apartment" | "none";
 
 export default function Step10GymAccess() {
   const navigate = useNavigate();
-  const [selected, setSelected] = useState<GymAccess | null>(null);
+  const store = useOnboardingStore();
+  const selected = store.gymAccess;
+  const setSelected = store.setGymAccess;
 
   const options: { value: GymAccess; label: string; description: string }[] = [
     {
@@ -29,14 +30,14 @@ export default function Step10GymAccess() {
 
   const handleContinue = () => {
     if (selected) {
-      navigate("/app");
+      navigate("/onboarding/personalize/agent");
     }
   };
 
   return (
     <PersonalizationLayout
-      step={getCurrentStepNumber(12)}
-      totalSteps={getTotalSteps()}
+      step={getCurrentStepNumber(12, store)}
+      totalSteps={getTotalSteps(store)}
       title="Do You Have Access to a Gym?"
       subtitle=""
       onContinue={handleContinue}

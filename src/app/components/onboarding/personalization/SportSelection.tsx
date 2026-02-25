@@ -1,7 +1,6 @@
-import { useState } from "react";
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { getTotalSteps, getCurrentStepNumber } from "../../../utils/onboardingSteps";
+import { useOnboardingStore, getTotalSteps, getCurrentStepNumber } from "../../../../stores/onboardingStore";
 
 type Sport =
   | "field-court"
@@ -13,7 +12,9 @@ type Sport =
 
 export default function SportSelection() {
   const navigate = useNavigate();
-  const [selectedSports, setSelectedSports] = useState<Sport[]>([]);
+  const store = useOnboardingStore();
+  const selectedSports = store.sportFocus;
+  const setSelectedSports = store.setSportFocus;
 
   const options: { value: Sport; label: string; description: string }[] = [
     {
@@ -64,8 +65,8 @@ export default function SportSelection() {
 
   return (
     <PersonalizationLayout
-      step={getCurrentStepNumber(10)}
-      totalSteps={getTotalSteps()}
+      step={getCurrentStepNumber(10, store)}
+      totalSteps={getTotalSteps(store)}
       title="What sport are you training for?"
       subtitle=""
       onContinue={handleContinue}

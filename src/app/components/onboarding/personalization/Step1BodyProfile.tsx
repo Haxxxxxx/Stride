@@ -1,10 +1,10 @@
-import { useState } from "react";
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
+import { useOnboardingStore } from "../../../../stores/onboardingStore";
 
 export default function Step1BodyProfile() {
   const navigate = useNavigate();
-  const [selected, setSelected] = useState<"woman" | "man" | null>(null);
+  const { bodyProfile: selected, setBodyProfile: setSelected } = useOnboardingStore();
 
   const handleContinue = () => {
     if (selected) {

@@ -1,7 +1,6 @@
-import { useState } from "react";
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { getTotalSteps, getCurrentStepNumber } from "../../../utils/onboardingSteps";
+import { useOnboardingStore, getTotalSteps, getCurrentStepNumber } from "../../../../stores/onboardingStore";
 
 type Equipment =
   | "bodyweight"
@@ -15,7 +14,9 @@ type Equipment =
 
 export default function EquipmentAccess() {
   const navigate = useNavigate();
-  const [selectedEquipment, setSelectedEquipment] = useState<Equipment[]>([]);
+  const store = useOnboardingStore();
+  const selectedEquipment = store.equipmentAccess;
+  const setSelectedEquipment = store.setEquipmentAccess;
 
   const options: { value: Equipment; label: string }[] = [
     { value: "bodyweight", label: "Bodyweight Only" },
@@ -38,15 +39,14 @@ export default function EquipmentAccess() {
 
   const handleContinue = () => {
     if (selectedEquipment.length > 0) {
-      localStorage.setItem('equipment', JSON.stringify(selectedEquipment));
       navigate("/onboarding/personalize/agent");
     }
   };
 
   return (
     <PersonalizationLayout
-      step={getCurrentStepNumber(11)}
-      totalSteps={getTotalSteps()}
+      step={getCurrentStepNumber(11, store)}
+      totalSteps={getTotalSteps(store)}
       title="What equipment do you have access to?"
       subtitle="Select what you can reliably train with each week."
       onContinue={handleContinue}

@@ -1,12 +1,10 @@
-import { useState } from "react";
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-
-type SessionTime = "10-20" | "20-40" | "40+";
+import { useOnboardingStore } from "../../../../stores/onboardingStore";
 
 export default function Step7SessionTime() {
   const navigate = useNavigate();
-  const [selected, setSelected] = useState<SessionTime | null>(null);
+  const { sessionTime: selected, setSessionTime: setSelected } = useOnboardingStore();
 
   const options: { value: SessionTime; label: string }[] = [
     { value: "10-20", label: "10–20 Minutes" },

@@ -1,12 +1,12 @@
-import { useState } from "react";
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
+import { useOnboardingStore } from "../../../../stores/onboardingStore";
 
 type Constraint = "injury" | "time" | "energy" | "equipment" | "none";
 
 export default function Step6Constraints() {
   const navigate = useNavigate();
-  const [selected, setSelected] = useState<Constraint[]>([]);
+  const { constraints: selected, setConstraints: setSelected } = useOnboardingStore();
 
   const options: { value: Constraint; label: string }[] = [
     { value: "injury", label: "Joint Pain or Injury" },

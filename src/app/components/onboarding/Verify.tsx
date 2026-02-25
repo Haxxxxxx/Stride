@@ -1,9 +1,11 @@
 import image_ed2679aab5c84af8a717c4d8b5f3c6d516a31e51 from 'figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.png'
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { useNavigate } from "react-router";
 import imgRectangle7 from "figma:asset/dc33bf4dcbc192d6dda86d23d93b5f6dced4ef05.png";
+import { useOnboardingStore } from "../../../stores/onboardingStore";
 
 export default function Verify() {
+  const { email } = useOnboardingStore();
   const navigate = useNavigate();
   const [code, setCode] = useState(["", "", "", "", "", ""]);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
@@ -58,7 +60,7 @@ export default function Verify() {
             Verification Code
           </div>
           <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/60 text-center">
-            We sent a 6-digit code to your email address
+            We sent a 6-digit code to {email || "your email address"}
           </div>
         </div>
 

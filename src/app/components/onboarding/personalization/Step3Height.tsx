@@ -1,14 +1,13 @@
-import { useState } from "react";
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
+import { useOnboardingStore } from "../../../../stores/onboardingStore";
 
 export default function Step3Height() {
   const navigate = useNavigate();
-  const [unit, setUnit] = useState<"cm" | "ft">("cm");
-  const [height, setHeight] = useState("175");
+  const { height, setHeight } = useOnboardingStore();
 
   const handleContinue = () => {
-    if (height) {
+    if (height.value) {
       navigate('/onboarding/personalize/4');
     }
   };
@@ -19,15 +18,15 @@ export default function Step3Height() {
       totalSteps={10}
       title="Select Height"
       onContinue={handleContinue}
-      canContinue={!!height}
+      canContinue={!!height.value}
     >
       <div className="flex flex-col items-center gap-12">
         {/* Unit Toggle */}
         <div className="bg-white/10 border border-white/20 p-1 flex gap-1">
           <button
-            onClick={() => setUnit("ft")}
+            onClick={() => setHeight({ ...height, unit: "ft" })}
             className={`px-6 py-2 font-['JetBrains_Mono',monospace] text-[9px] uppercase tracking-wider transition-colors ${
-              unit === "ft"
+              height.unit === "ft"
                 ? "bg-white/20 text-white"
                 : "text-white/40"
             }`}
@@ -35,9 +34,9 @@ export default function Step3Height() {
             Feet
           </button>
           <button
-            onClick={() => setUnit("cm")}
+            onClick={() => setHeight({ ...height, unit: "cm" })}
             className={`px-6 py-2 font-['JetBrains_Mono',monospace] text-[9px] uppercase tracking-wider transition-colors ${
-              unit === "cm"
+              height.unit === "cm"
                 ? "bg-[#ff6600] text-black"
                 : "text-white/40"
             }`}
@@ -51,13 +50,13 @@ export default function Step3Height() {
           <div className="border-2 border-white/40 bg-white/5 px-6 py-4">
             <input
               type="number"
-              value={height}
-              onChange={(e) => setHeight(e.target.value)}
+              value={height.value}
+              onChange={(e) => setHeight({ ...height, value: e.target.value })}
               className="w-20 bg-transparent font-['JetBrains_Mono',monospace] text-[26px] text-white text-center focus:outline-none"
             />
           </div>
           <div className="font-['JetBrains_Mono',monospace] text-[14px] text-white">
-            {unit}
+            {height.unit}
           </div>
         </div>
       </div>

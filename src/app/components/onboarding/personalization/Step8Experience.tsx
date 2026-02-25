@@ -1,12 +1,10 @@
-import { useState } from "react";
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-
-type Experience = "beginner" | "inconsistent" | "intermediate" | "advanced";
+import { useOnboardingStore } from "../../../../stores/onboardingStore";
 
 export default function Step8Experience() {
   const navigate = useNavigate();
-  const [selected, setSelected] = useState<Experience | null>(null);
+  const { experience: selected, setExperience: setSelected } = useOnboardingStore();
 
   const options: { value: Experience; label: string; description: string }[] = [
     { 

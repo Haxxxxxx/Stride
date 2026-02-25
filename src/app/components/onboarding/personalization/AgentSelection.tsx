@@ -1,7 +1,6 @@
-import { useState } from "react";
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { getTotalSteps, getCurrentStepNumber } from "../../../utils/onboardingSteps";
+import { useOnboardingStore, getTotalSteps, getCurrentStepNumber } from "../../../../stores/onboardingStore";
 import svgPaths from "../../../../imports/svg-oe8cws8da9";
 
 type Agent = "atlas" | "orion" | "kade";
@@ -33,7 +32,9 @@ interface AgentOption {
 
 export default function AgentSelection() {
   const navigate = useNavigate();
-  const [selectedAgent, setSelectedAgent] = useState<Agent | null>("atlas");
+  const store = useOnboardingStore();
+  const selectedAgent = store.selectedAgent ?? "atlas";
+  const setSelectedAgent = store.setSelectedAgent;
 
   const agents: AgentOption[] = [
     {
@@ -59,17 +60,16 @@ export default function AgentSelection() {
 
   const handleContinue = () => {
     if (selectedAgent) {
-      localStorage.setItem('trainingAgent', selectedAgent);
       navigate("/onboarding/personalize/forging");
     }
   };
 
-  const currentStep = getCurrentStepNumber(12);
+  const currentStep = getCurrentStepNumber(12, store);
 
   return (
     <PersonalizationLayout
       step={currentStep}
-      totalSteps={getTotalSteps()}
+      totalSteps={getTotalSteps(store)}
       title="Choose your training agent"
       subtitle="This affects how FORGE pushes, adapts, and holds you accountable."
       onContinue={handleContinue}

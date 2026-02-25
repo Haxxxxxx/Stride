@@ -1,11 +1,15 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.png";
+import { useOnboardingStore } from "../../../stores/onboardingStore";
+import { useAuth } from "../../contexts/AuthContext";
+import { setDocument } from "../../../services/firestore";
 
 export default function CreateProfile() {
   const navigate = useNavigate();
-  const [pseudo, setPseudo] = useState("");
-  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  const { callsign, setCallsign, avatarPreview, setAvatarPreview } = useOnboardingStore();
+  const { user } = useAuth();
+  const [saving, setSaving] = useState(false);
 
   const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -18,10 +22,25 @@ export default function CreateProfile() {
     }
   };
 
-  const handleContinue = () => {
-    if (pseudo) {
-      // Save profile and navigate to personalization
+  const handleContinue = async () => {
+    if (!callsign) return;
+    setSaving(true);
+
+    try {
+      if (user) {
+        await setDocument(`users/${user.uid}`, {
+          callsign,
+          avatarUrl: avatarPreview || null,
+          createdAt: new Date().toISOString(),
+          onboardingComplete: false,
+        });
+      }
       navigate('/onboarding/personalize/1');
+    } catch {
+      // Still navigate even if Firestore write fails — data is in the store
+      navigate('/onboarding/personalize/1');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -37,9 +56,9 @@ export default function CreateProfile() {
         {/* Header */}
         <div className="flex flex-col items-center gap-4 w-full">
           <div className="h-[24px] w-[35px] overflow-hidden relative">
-            <img 
-              src={imgRectangle7} 
-              alt="Logo" 
+            <img
+              src={imgRectangle7}
+              alt="Logo"
               className="w-full h-full object-contain"
             />
           </div>
@@ -57,16 +76,16 @@ export default function CreateProfile() {
                 <img src={avatarPreview} alt="Avatar preview" className="size-full object-cover" />
               ) : (
                 <svg className="size-8 text-white/60 group-hover:text-[#ff6600] transition-colors" fill="none" viewBox="0 0 32 32">
-                  <path 
-                    d="M16 8V24M8 16H24" 
-                    stroke="currentColor" 
-                    strokeWidth="2" 
+                  <path
+                    d="M16 8V24M8 16H24"
+                    stroke="currentColor"
+                    strokeWidth="2"
                     strokeLinecap="square"
                   />
                   <circle cx="16" cy="11" r="3" stroke="currentColor" strokeWidth="2" />
-                  <path 
-                    d="M9 24C9 20.6863 11.6863 18 15 18H17C20.3137 18 23 20.6863 23 24" 
-                    stroke="currentColor" 
+                  <path
+                    d="M9 24C9 20.6863 11.6863 18 15 18H17C20.3137 18 23 20.6863 23 24"
+                    stroke="currentColor"
                     strokeWidth="2"
                   />
                 </svg>
@@ -87,8 +106,8 @@ export default function CreateProfile() {
             </label>
             <input
               type="text"
-              value={pseudo}
-              onChange={(e) => setPseudo(e.target.value)}
+              value={callsign}
+              onChange={(e) => setCallsign(e.target.value)}
               placeholder="OPERATOR_001"
               className="w-full bg-black border border-white/20 px-4 py-3 font-['JetBrains_Mono',monospace] text-[12px] text-white placeholder:text-white/30 focus:border-[#ff6600] focus:outline-none uppercase tracking-wider"
             />
@@ -98,10 +117,10 @@ export default function CreateProfile() {
         {/* Continue Button */}
         <button
           onClick={handleContinue}
-          disabled={!pseudo}
+          disabled={!callsign || saving}
           className="w-full bg-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[11px] text-black font-bold uppercase tracking-wider hover:bg-[#ff8833] transition-colors disabled:opacity-30 disabled:cursor-not-allowed border-2 border-[#ff6600]"
         >
-          Initialize System →
+          {saving ? "Saving..." : "Initialize System →"}
         </button>
       </div>
     </div>
