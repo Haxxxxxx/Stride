@@ -1,6 +1,7 @@
 import { Link, useNavigate } from "react-router";
 import imgRectangle6 from "figma:asset/c92ce858c610970c9ceacaa61f2a4aa8318c963d.png";
 import { useState, useRef } from "react";
+import { logOut } from "../../services/auth";
 
 function ProfileEditor() {
   const [isEditing, setIsEditing] = useState(false);
@@ -368,9 +369,8 @@ function ShareableProgressCard() {
 function SystemInfo() {
   const navigate = useNavigate();
 
-  const handleDisconnect = () => {
-    // Clear any session data if you add it later
-    // For now, just navigate to splashscreen
+  const handleDisconnect = async () => {
+    await logOut();
     navigate('/');
   };
 

@@ -1,17 +1,18 @@
 # STRIDE — Fix Plan
 
 ## Phase 1: Foundation [HIGH PRIORITY]
-- [ ] Install core dependencies (firebase, zustand, @tanstack/react-query)
-- [ ] Create Firebase config service (`src/services/firebase.ts`) using env vars from .env
-- [ ] Create Firebase Auth service (`src/services/auth.ts`) with email/password + Google Sign-In + anonymous
-- [ ] Create auth context/provider (`src/app/contexts/AuthContext.tsx`) with useAuth hook
-- [ ] Add protected route wrapper — redirect unauthenticated users to onboarding
+- [x] Install core dependencies (firebase, zustand)
+- [x] Create Firebase config service (`src/services/firebase.ts`) using env vars from .env
+- [x] Create Firebase Auth service (`src/services/auth.ts`) with email/password + Google Sign-In + anonymous
+- [x] Create auth context/provider (`src/app/contexts/AuthContext.tsx`) with useAuth hook
+- [x] Add protected route wrapper — redirect unauthenticated users to onboarding
+- [x] Create Firestore service layer (`src/services/firestore.ts`) with typed CRUD operations
+- [x] Update Profile disconnect button to call Firebase Auth sign out
+- [x] Fix figma:asset/ build resolution (Vite plugin for production builds)
 - [ ] Wire onboarding Welcome/Verify/BetaCode screens to Firebase Auth (sign up / sign in)
 - [ ] Wire CreateProfile screen to save profile data to Firestore `users/{uid}/profile`
 - [ ] Wire personalization steps (Steps 1-10) to save to Firestore `users/{uid}/personalization`
 - [ ] Wire AgentSelection to save selected agent to Firestore
-- [ ] Create Firestore service layer (`src/services/firestore.ts`) with typed CRUD operations
-- [ ] Update Profile disconnect button to call Firebase Auth sign out
 
 ## Phase 2: LLM Integration [HIGH PRIORITY]
 - [ ] Create LLM service abstraction (`src/services/llm.ts`) with provider fallback (Groq → Together → OpenRouter)

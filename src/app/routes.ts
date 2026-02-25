@@ -1,5 +1,6 @@
 import { createBrowserRouter } from "react-router";
 import Root from "./components/Root";
+import ProtectedRoute from "./components/ProtectedRoute";
 import Dashboard from "./components/Dashboard";
 import Progress from "./components/Progress";
 import Profile from "./components/Profile";
@@ -57,15 +58,20 @@ export const router = createBrowserRouter([
   },
   {
     path: "/app",
-    Component: Root,
+    Component: ProtectedRoute,
     children: [
-      { index: true, Component: Dashboard },
-      { path: "progress", Component: Progress },
-      { path: "challenges", Component: Challenges },
-      { path: "challenges/:id", Component: ChallengeDetail },
-      { path: "profile", Component: Profile },
-      { path: "ai-agent", Component: AIAgent },
-      { path: "notifications", Component: Notifications },
+      {
+        Component: Root,
+        children: [
+          { index: true, Component: Dashboard },
+          { path: "progress", Component: Progress },
+          { path: "challenges", Component: Challenges },
+          { path: "challenges/:id", Component: ChallengeDetail },
+          { path: "profile", Component: Profile },
+          { path: "ai-agent", Component: AIAgent },
+          { path: "notifications", Component: Notifications },
+        ],
+      },
     ],
   },
 ]);
