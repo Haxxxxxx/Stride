@@ -182,7 +182,7 @@
 
 - [x] Error boundaries around main screens — DONE
 - [x] Loading skeletons for async reads (black bg, #ff6600 pulse) — DONE
-- [ ] Firestore offline persistence (`enableIndexedDbPersistence`)
+- [x] Firestore offline persistence (`enableIndexedDbPersistence`) — DONE
 - [ ] Production Firestore security rules
 - [ ] Firebase Storage security rules for avatars
 - [ ] Firebase Hosting deployment config
