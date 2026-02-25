@@ -170,7 +170,7 @@
 
 - [x] Create `src/services/challenges.ts` — CRUD for challenges collection + join/leave + participant queries + helpers
 - [x] Create `src/services/squads.ts` — CRUD with invite code generation (SQD-XXXXXX), join by code, member management
-- [ ] Wire Challenges.tsx to Firestore (join challenge, create/join squad)
+- [x] Wire Challenges.tsx to Firestore (join challenge, create/join squad, live data loading, empty states)
 - [ ] Wire ChallengeDetail.tsx leaderboard from real participant data
 - [ ] Wire UserProfileModal to read shared profiles
 - [ ] Create `src/services/notifications.ts` — notification creation helper

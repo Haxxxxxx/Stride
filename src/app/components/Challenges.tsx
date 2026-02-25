@@ -1,25 +1,70 @@
 import { Link, useNavigate } from "react-router";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import imgImage7 from "figma:asset/bf6da9de1404bcbb96bc246c72916c15f2e89025.png";
 import imgImage8 from "figma:asset/24b6a62b7bae129c46221394e6598883d13abaec.png";
 import imgImage12 from "figma:asset/dd40dbe95c08e8ffafa5e44173f6b8033e5ccfed.png";
 import imgImage10 from "figma:asset/f66d8c8b01a14e7f20794613021e602bd29e44f5.png";
 import imgImage2 from "figma:asset/fa12b2e954b8d8835c7af0f64149782f3496b2f7.png";
+import { useAuth } from "../contexts/AuthContext";
+import { getDocument } from "../../services/firestore";
+import {
+  type Challenge,
+  getActiveChallenges,
+  joinChallenge as joinChallengeService,
+  isParticipant,
+  daysRemaining,
+} from "../../services/challenges";
+import {
+  type Squad,
+  createSquad as createSquadService,
+  joinSquadByCode,
+  getUserSquads,
+  getSquadMembers,
+} from "../../services/squads";
 
 // Join Challenge Modal
-function JoinChallengeModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+function JoinChallengeModal({
+  isOpen,
+  onClose,
+  challenge,
+  onJoined,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  challenge: Challenge | null;
+  onJoined: () => void;
+}) {
+  const { user } = useAuth();
   const [shareProgress, setShareProgress] = useState(true);
+  const [joining, setJoining] = useState(false);
 
-  if (!isOpen) return null;
+  if (!isOpen || !challenge) return null;
+
+  const handleJoin = async () => {
+    if (!user) return;
+    setJoining(true);
+    try {
+      const profile = await getDocument<{ callsign?: string }>(`users/${user.uid}`);
+      await joinChallengeService(challenge.id, user.uid, shareProgress, profile?.callsign);
+      onJoined();
+      onClose();
+    } catch (err) {
+      console.warn("Failed to join challenge:", err);
+    } finally {
+      setJoining(false);
+    }
+  };
+
+  const days = daysRemaining(challenge.endDate);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
       {/* Backdrop */}
-      <div 
+      <div
         className="absolute inset-0 bg-black/90"
         onClick={onClose}
       />
-      
+
       {/* Modal */}
       <div className="relative z-10 w-full max-w-md border-2 border-[#ff6600] bg-black p-6">
         {/* Scanline effect */}
@@ -52,17 +97,17 @@ function JoinChallengeModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
           {/* Challenge Info */}
           <div className="border border-white/20 p-4 mb-6">
             <div className="font-['JetBrains_Mono',monospace] text-[14px] text-white font-bold uppercase mb-2">
-              February Community Challenge
+              {challenge.title}
             </div>
             <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/60 mb-3">
-              Have a Consistency Score of at least 80% by the end of the month.
+              {challenge.description}
             </div>
             <div className="flex items-center gap-4 text-[9px]">
               <div className="font-['JetBrains_Mono',monospace] text-white/40">
-                <span className="text-[#ff6600] font-bold">25</span> Participants
+                <span className="text-[#ff6600] font-bold">{challenge.participantCount}</span> Participants
               </div>
               <div className="font-['JetBrains_Mono',monospace] text-white/40">
-                <span className="text-[#ff6600] font-bold">9</span> Days Left
+                <span className="text-[#ff6600] font-bold">{days}</span> Days Left
               </div>
             </div>
           </div>
@@ -102,14 +147,11 @@ function JoinChallengeModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
               Cancel
             </button>
             <button
-              onClick={() => {
-                // Handle join challenge logic here
-                console.log({ shareProgress });
-                onClose();
-              }}
-              className="flex-1 bg-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[10px] text-black font-bold uppercase tracking-wider hover:bg-[#ff8833] transition-colors"
+              onClick={handleJoin}
+              disabled={joining}
+              className="flex-1 bg-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[10px] text-black font-bold uppercase tracking-wider hover:bg-[#ff8833] transition-colors disabled:opacity-50"
             >
-              Join Challenge →
+              {joining ? "Joining..." : "Join Challenge →"}
             </button>
           </div>
         </div>
@@ -119,9 +161,20 @@ function JoinChallengeModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
 }
 
 // Join Squad Modal
-function JoinSquadModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+function JoinSquadModal({
+  isOpen,
+  onClose,
+  onJoined,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onJoined: () => void;
+}) {
+  const { user } = useAuth();
   const [squadCode, setSquadCode] = useState("");
   const [shareProgress, setShareProgress] = useState(true);
+  const [joining, setJoining] = useState(false);
+  const [error, setError] = useState("");
 
   if (!isOpen) return null;
 
@@ -207,6 +260,14 @@ function JoinSquadModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => v
             </div>
           </div>
 
+          {error && (
+            <div className="mb-4 border border-red-500/30 bg-red-500/10 p-3">
+              <div className="font-['JetBrains_Mono',monospace] text-[10px] text-red-400 uppercase">
+                {error}
+              </div>
+            </div>
+          )}
+
           {/* Actions */}
           <div className="flex gap-3">
             <button
@@ -216,14 +277,30 @@ function JoinSquadModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => v
               Cancel
             </button>
             <button
-              onClick={() => {
-                // Handle join squad logic here
-                console.log({ squadCode, shareProgress });
-                onClose();
+              onClick={async () => {
+                if (!user || !squadCode.trim()) return;
+                setJoining(true);
+                setError("");
+                try {
+                  const profile = await getDocument<{ callsign?: string; avatarUrl?: string }>(`users/${user.uid}`);
+                  const result = await joinSquadByCode(squadCode.trim(), user.uid, shareProgress, profile?.callsign, profile?.avatarUrl);
+                  if (result.success) {
+                    onJoined();
+                    onClose();
+                    setSquadCode("");
+                  } else {
+                    setError(result.error ?? "Failed to join squad");
+                  }
+                } catch (err) {
+                  setError("Failed to join squad");
+                } finally {
+                  setJoining(false);
+                }
               }}
-              className="flex-1 bg-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[10px] text-black font-bold uppercase tracking-wider hover:bg-[#ff8833] transition-colors"
+              disabled={joining || !squadCode.trim()}
+              className="flex-1 bg-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[10px] text-black font-bold uppercase tracking-wider hover:bg-[#ff8833] transition-colors disabled:opacity-50"
             >
-              Join Squad →
+              {joining ? "Joining..." : "Join Squad →"}
             </button>
           </div>
         </div>
@@ -381,18 +458,65 @@ function UserProfileModal({
   );
 }
 
+// Placeholder avatars for squad member display
+const placeholderAvatars = [imgImage8, imgImage12, imgImage10, imgImage2];
+
 export default function Challenges() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showJoinSquadModal, setShowJoinSquadModal] = useState(false);
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState<{ name: string; avatar: string; sharingProgress: boolean } | null>(null);
 
-  const squads = [
-    { id: 1, name: "Home Squad", type: "Consistency", members: [imgImage8, imgImage12, imgImage10, imgImage2], extraCount: 4 },
-    { id: 2, name: "Iron Collective", type: "Strength", members: [imgImage2, imgImage10, imgImage8], extraCount: 6 },
-    { id: 3, name: "Endurance Unit", type: "Endurance", members: [imgImage12, imgImage8, imgImage2], extraCount: 3 },
-  ];
+  // Live data
+  const [challenges, setChallenges] = useState<Challenge[]>([]);
+  const [squads, setSquads] = useState<(Squad & { memberAvatars: string[] })[]>([]);
+  const [joinedChallengeIds, setJoinedChallengeIds] = useState<Set<string>>(new Set());
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const refresh = () => setRefreshKey((k) => k + 1);
+
+  // Load challenges
+  useEffect(() => {
+    getActiveChallenges()
+      .then(setChallenges)
+      .catch(console.warn);
+  }, [refreshKey]);
+
+  // Load user squads
+  useEffect(() => {
+    if (!user) return;
+    getUserSquads(user.uid)
+      .then(async (userSquads) => {
+        const enriched = await Promise.all(
+          userSquads.map(async (s) => {
+            const members = await getSquadMembers(s.id).catch(() => []);
+            const avatars = members
+              .slice(0, 4)
+              .map((m, i) => m.avatarUrl || placeholderAvatars[i % placeholderAvatars.length]);
+            return { ...s, memberAvatars: avatars };
+          })
+        );
+        setSquads(enriched);
+      })
+      .catch(console.warn);
+  }, [user, refreshKey]);
+
+  // Check which challenges user has joined
+  useEffect(() => {
+    if (!user || challenges.length === 0) return;
+    Promise.all(
+      challenges.map(async (c) => {
+        const joined = await isParticipant(c.id, user.uid);
+        return joined ? c.id : null;
+      })
+    ).then((ids) => {
+      setJoinedChallengeIds(new Set(ids.filter(Boolean) as string[]));
+    });
+  }, [user, challenges]);
+
+  const featuredChallenge = challenges[0] ?? null;
 
   return (
     <div className="w-full p-6 pb-24">
@@ -407,9 +531,10 @@ export default function Challenges() {
       </div>
 
       {/* Featured Community Challenge */}
-      <div 
+      {featuredChallenge ? (
+      <div
         className="border-2 border-[#ff6600] bg-[#ff6600]/5 p-5 mb-4 relative cursor-pointer hover:bg-[#ff6600]/10 transition-colors"
-        onClick={() => setShowJoinModal(true)}
+        onClick={() => !joinedChallengeIds.has(featuredChallenge.id) && setShowJoinModal(true)}
       >
         <div className="absolute inset-0 pointer-events-none opacity-[0.03]" style={{
           backgroundImage: `repeating-linear-gradient(0deg, transparent, transparent 1px, white 2px, white 2px)`,
@@ -422,14 +547,14 @@ export default function Challenges() {
               <div className="flex items-center gap-2 mb-2">
                 <div className="size-2 bg-[#ff6600] animate-pulse" />
                 <div className="font-['JetBrains_Mono',monospace] text-[10px] text-[#ff6600] uppercase tracking-wider">
-                  Active Community Challenge
+                  {joinedChallengeIds.has(featuredChallenge.id) ? "Joined" : "Active Community Challenge"}
                 </div>
               </div>
               <div className="font-['JetBrains_Mono',monospace] text-[18px] text-white font-bold uppercase mb-2">
-                February Community Challenge
+                {featuredChallenge.title}
               </div>
               <div className="font-['JetBrains_Mono',monospace] text-[11px] text-white/80">
-                Have a Consistency Score of at least 80% by the end of the month.
+                {featuredChallenge.description}
               </div>
             </div>
 
@@ -452,14 +577,14 @@ export default function Challenges() {
                   fill="none"
                   stroke="#ff6600"
                   strokeWidth="4"
-                  strokeDasharray={`${2 * Math.PI * 28 * 0.8} ${2 * Math.PI * 28}`}
+                  strokeDasharray={`${2 * Math.PI * 28 * (featuredChallenge.target / 100)} ${2 * Math.PI * 28}`}
                   strokeLinecap="square"
                   transform="rotate(-90 32 32)"
                 />
               </svg>
               <div className="absolute inset-0 flex flex-col items-center justify-center">
                 <div className="font-['JetBrains_Mono',monospace] text-[14px] text-[#ff6600] font-bold">
-                  80%
+                  {featuredChallenge.target}%
                 </div>
                 <svg className="size-4 mt-0.5" fill="none" viewBox="0 0 16 16">
                   <path
@@ -472,40 +597,47 @@ export default function Challenges() {
           </div>
 
           <button className="w-full border border-[#ff6600] bg-black/50 py-2 font-['JetBrains_Mono',monospace] text-[11px] text-[#ff6600] uppercase hover:bg-[#ff6600] hover:text-black transition-colors">
-            Start the Challenge →
+            {joinedChallengeIds.has(featuredChallenge.id) ? "Joined ✓" : "Start the Challenge →"}
           </button>
         </div>
       </div>
+      ) : (
+        <div className="border border-white/10 p-5 mb-4 text-center">
+          <div className="font-['JetBrains_Mono',monospace] text-[11px] text-white/40 uppercase tracking-wider">
+            No active challenges
+          </div>
+        </div>
+      )}
 
       {/* Challenge Stats */}
       <div className="border border-white/20 p-5 mb-6">
         <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/60 uppercase tracking-wider mb-4">
           Challenge Statistics
         </div>
-        
+
         <div className="grid grid-cols-3 gap-3">
           <div className="border border-white/20 p-3 text-center">
             <div className="font-['JetBrains_Mono',monospace] text-[18px] text-[#ff6600] font-bold">
-              12
+              {joinedChallengeIds.size}
             </div>
             <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider">
-              Completed
+              Joined
             </div>
           </div>
           <div className="border border-white/20 p-3 text-center">
             <div className="font-['JetBrains_Mono',monospace] text-[18px] text-white font-bold">
-              2
+              {challenges.length}
             </div>
             <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider">
               Active
             </div>
           </div>
           <div className="border border-white/20 p-3 text-center">
-            <div className="font-['JetBrains_Mono',monospace] text-[18px] text-white/40 font-bold">
-              1
+            <div className="font-['JetBrains_Mono',monospace] text-[18px] text-white font-bold">
+              {squads.length}
             </div>
             <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider">
-              Locked
+              Squads
             </div>
           </div>
         </div>
@@ -567,29 +699,38 @@ export default function Challenges() {
 
                 {/* Member Avatars */}
                 <div className="flex items-center -space-x-2">
-                  {squad.members.map((avatar, idx) => (
+                  {squad.memberAvatars.slice(0, 4).map((avatar, idx) => (
                     <div key={idx} className="size-5 border-2 border-black overflow-hidden">
                       <img src={avatar} alt="" className="size-full object-cover" />
                     </div>
                   ))}
-                  <div className="size-5 border-2 border-black bg-white/10 flex items-center justify-center">
-                    <span className="font-['JetBrains_Mono',monospace] text-[7px] text-white font-bold">
-                      +{squad.extraCount}
-                    </span>
-                  </div>
+                  {(squad.memberCount ?? 0) > 4 && (
+                    <div className="size-5 border-2 border-black bg-white/10 flex items-center justify-center">
+                      <span className="font-['JetBrains_Mono',monospace] text-[7px] text-white font-bold">
+                        +{(squad.memberCount ?? 0) - 4}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
           ))}
+          {squads.length === 0 && (
+            <div className="border border-white/10 p-4 text-center">
+              <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/40 uppercase tracking-wider">
+                No squads yet — create or join one
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Create Squad Modal */}
-      <CreateSquadModal isOpen={showCreateModal} onClose={() => setShowCreateModal(false)} />
+      <CreateSquadModal isOpen={showCreateModal} onClose={() => setShowCreateModal(false)} onCreated={refresh} />
       {/* Join Challenge Modal */}
-      <JoinChallengeModal isOpen={showJoinModal} onClose={() => setShowJoinModal(false)} />
+      <JoinChallengeModal isOpen={showJoinModal} onClose={() => setShowJoinModal(false)} challenge={featuredChallenge} onJoined={refresh} />
       {/* Join Squad Modal */}
-      <JoinSquadModal isOpen={showJoinSquadModal} onClose={() => setShowJoinSquadModal(false)} />
+      <JoinSquadModal isOpen={showJoinSquadModal} onClose={() => setShowJoinSquadModal(false)} onJoined={refresh} />
       {/* User Profile Modal */}
       <UserProfileModal isOpen={!!showProfileModal} onClose={() => setShowProfileModal(null)} user={showProfileModal} />
     </div>
@@ -597,12 +738,22 @@ export default function Challenges() {
 }
 
 // Create Squad Modal
-function CreateSquadModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+function CreateSquadModal({
+  isOpen,
+  onClose,
+  onCreated,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const { user } = useAuth();
   const [squadName, setSquadName] = useState("");
   const [squadType, setSquadType] = useState("Consistency");
   const [shareProgress, setShareProgress] = useState(true);
   const [showShareCode, setShowShareCode] = useState(false);
-  const [squadCode] = useState("SQD-" + Math.random().toString(36).substring(2, 8).toUpperCase());
+  const [squadCode, setSquadCode] = useState("");
+  const [creating, setCreating] = useState(false);
 
   if (!isOpen) return null;
 
@@ -724,14 +875,32 @@ function CreateSquadModal({ isOpen, onClose }: { isOpen: boolean; onClose: () =>
                   Cancel
                 </button>
                 <button
-                  onClick={() => {
-                    // Handle create squad logic here
-                    console.log({ squadName, squadType, shareProgress });
-                    setShowShareCode(true);
+                  onClick={async () => {
+                    if (!user || !squadName.trim()) return;
+                    setCreating(true);
+                    try {
+                      const profile = await getDocument<{ callsign?: string; avatarUrl?: string }>(`users/${user.uid}`);
+                      const result = await createSquadService(
+                        user.uid,
+                        squadName.trim(),
+                        squadType,
+                        shareProgress,
+                        profile?.callsign,
+                        profile?.avatarUrl
+                      );
+                      setSquadCode(result.code);
+                      setShowShareCode(true);
+                      onCreated();
+                    } catch (err) {
+                      console.warn("Failed to create squad:", err);
+                    } finally {
+                      setCreating(false);
+                    }
                   }}
-                  className="flex-1 bg-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[10px] text-black font-bold uppercase tracking-wider hover:bg-[#ff8833] transition-colors"
+                  disabled={creating || !squadName.trim()}
+                  className="flex-1 bg-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[10px] text-black font-bold uppercase tracking-wider hover:bg-[#ff8833] transition-colors disabled:opacity-50"
                 >
-                  Create Squad →
+                  {creating ? "Creating..." : "Create Squad →"}
                 </button>
               </div>
             </>
