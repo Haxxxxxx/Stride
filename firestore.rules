@@ -2,17 +2,62 @@ rules_version='2'
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
-      // This rule allows anyone with your database reference to view, edit,
-      // and delete all data in your database. It is useful for getting
-      // started, but it is configured to expire after 30 days because it
-      // leaves your app open to attackers. At that time, all client
-      // requests to your database will be denied.
-      //
-      // Make sure to write security rules for your app before that time, or
-      // else all client requests to your database will be denied until you
-      // update your rules.
-      allow read, write: if request.time < timestamp.date(2026, 3, 27);
+
+    // --- User data: only the owner can read/write ---
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+
+      // Subcollections under user doc
+      match /personalization/{docId} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
+      match /behaviorState/{docId} {
+        allow read: if request.auth != null;
+        allow write: if request.auth != null && request.auth.uid == uid;
+      }
+      match /programs/{programId} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
+      match /workoutLogs/{logId} {
+        allow read: if request.auth != null;
+        allow write: if request.auth != null && request.auth.uid == uid;
+      }
+      match /notifications/{notifId} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
+      match /settings/{docId} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+
+    // --- Challenges: any authenticated user can read, join/leave ---
+    match /challenges/{challengeId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
+
+      match /participants/{uid} {
+        allow read: if request.auth != null;
+        allow create, update, delete: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+
+    // --- Squads: any authenticated user can read, members manage own docs ---
+    match /squads/{squadId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
+
+      match /members/{uid} {
+        allow read: if request.auth != null;
+        allow create, update, delete: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+
+    // --- Beta codes: authenticated users can read + mark as used ---
+    match /betaCodes/{code} {
+      allow read: if request.auth != null;
+      allow update: if request.auth != null;
     }
   }
 }

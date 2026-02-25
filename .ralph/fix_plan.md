@@ -183,9 +183,9 @@
 - [x] Error boundaries around main screens — DONE
 - [x] Loading skeletons for async reads (black bg, #ff6600 pulse) — DONE
 - [x] Firestore offline persistence (`enableIndexedDbPersistence`) — DONE
-- [ ] Production Firestore security rules
-- [ ] Firebase Storage security rules for avatars
-- [ ] Firebase Hosting deployment config
+- [x] Production Firestore security rules — DONE
+- [x] Firebase Storage security rules for avatars — DONE
+- [x] Firebase Hosting deployment config — already configured in firebase.json
 - [ ] Route-level code splitting (`React.lazy()`)
 - [x] Upload avatar to Firebase Storage (done in Phase 3.5 — Profile.tsx)
 - [ ] Final `npm run build` — zero errors/warnings
