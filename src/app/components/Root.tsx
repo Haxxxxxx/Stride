@@ -1,6 +1,7 @@
 import { Outlet, useLocation, Link } from "react-router";
 import svgPaths from "../../imports/svg-2gts8wf65t";
 import { useState } from "react";
+import ErrorBoundary from "./ErrorBoundary";
 
 function Battery() {
   return (
@@ -176,7 +177,9 @@ export default function Root() {
         )}
         
         <div className={`w-full flex-1 overflow-y-auto ${isAIPage ? '' : 'pb-[90px]'}`}>
-          <Outlet />
+          <ErrorBoundary key={location.pathname}>
+            <Outlet />
+          </ErrorBoundary>
         </div>
         
         {!isAIPage && (

@@ -180,14 +180,14 @@
 
 ## Phase 5: Polish & Deploy [LOW PRIORITY]
 
-- [ ] Error boundaries around main screens
-- [ ] Loading skeletons for async reads (black bg, #ff6600 pulse)
+- [x] Error boundaries around main screens — DONE
+- [x] Loading skeletons for async reads (black bg, #ff6600 pulse) — DONE
 - [ ] Firestore offline persistence (`enableIndexedDbPersistence`)
 - [ ] Production Firestore security rules
 - [ ] Firebase Storage security rules for avatars
 - [ ] Firebase Hosting deployment config
 - [ ] Route-level code splitting (`React.lazy()`)
-- [ ] Upload avatar to Firebase Storage (currently saves base64 data URL)
+- [x] Upload avatar to Firebase Storage (done in Phase 3.5 — Profile.tsx)
 - [ ] Final `npm run build` — zero errors/warnings
 
 ---
