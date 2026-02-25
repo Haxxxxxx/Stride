@@ -147,12 +147,14 @@
 - [x] Performance chart derived from weekly log counts (last 4 weeks)
 - [x] Recent activity from last 5 workout logs with real timestamps/durations
 
-### 3.5 Wire Profile to Firebase + Firestore
-- [ ] Read profile data from Firestore `users/{uid}` (callsign, bio, avatarUrl)
-- [ ] Read email from `useAuth().user.email`
-- [ ] Wire `handleSave()` to `updateDocument('users/{uid}', { callsign, bio })`
-- [ ] Wire avatar upload to Firebase Storage `avatars/{uid}` → update profile avatarUrl
-- [ ] Replace hardcoded stats with real behaviorStore values
+### 3.5 Wire Profile to Firebase + Firestore — DONE
+- [x] Read profile data from Firestore `users/{uid}` (callsign, bio, avatarUrl) on mount
+- [x] Read email from `useAuth().user.email`
+- [x] Wire `handleSave()` to `updateDocument('users/{uid}', { callsign, bio })`
+- [x] Wire avatar upload to Firebase Storage `avatars/{uid}` → update profile avatarUrl
+- [x] Replace hardcoded stats (28/168/94%) with real behaviorStore values (streak, total ops, success rate)
+- [x] ShareableProgressCard reads real data from behaviorStore + callsign from Firestore
+- [x] Dynamic date in share card footer
 
 ### 3.6 Wire Notifications
 - [ ] Query `users/{uid}/notifications` ordered by createdAt desc

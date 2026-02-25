@@ -1,15 +1,38 @@
-import { Link, useNavigate } from "react-router";
+import { useNavigate } from "react-router";
 import imgRectangle6 from "figma:asset/c92ce858c610970c9ceacaa61f2a4aa8318c963d.png";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { logOut } from "../../services/auth";
+import { useAuth } from "../contexts/AuthContext";
+import { getDocument, updateDocument } from "../../services/firestore";
+import { getBehaviorState } from "../utils/behaviorStore";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { storage } from "../../services/firebase";
 
 function ProfileEditor() {
+  const { user } = useAuth();
   const [isEditing, setIsEditing] = useState(false);
-  const [name, setName] = useState("marathonbill");
-  const [email, setEmail] = useState("bill@operator.sys");
-  const [bio, setBio] = useState("Optimizing performance metrics. Running the protocol.");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [bio, setBio] = useState("");
   const [profileImage, setProfileImage] = useState(imgRectangle6);
+  const [saving, setSaving] = useState(false);
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Load profile from Firestore + Auth
+  useEffect(() => {
+    if (!user) return;
+    setEmail(user.email ?? "");
+    getDocument<{ callsign?: string; bio?: string; avatarUrl?: string }>(`users/${user.uid}`)
+      .then((doc) => {
+        if (doc) {
+          setName(doc.callsign ?? "");
+          setBio(doc.bio ?? "");
+          if (doc.avatarUrl) setProfileImage(doc.avatarUrl);
+        }
+      })
+      .catch(console.warn);
+  }, [user]);
 
   const handleImageClick = () => {
     if (isEditing && fileInputRef.current) {
@@ -20,6 +43,7 @@ function ProfileEditor() {
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      setAvatarFile(file);
       const reader = new FileReader();
       reader.onloadend = () => {
         setProfileImage(reader.result as string);
@@ -28,9 +52,29 @@ function ProfileEditor() {
     }
   };
 
-  const handleSave = () => {
-    setIsEditing(false);
-    // In a real app, save to backend here
+  const handleSave = async () => {
+    if (!user) return;
+    setSaving(true);
+    try {
+      const updates: Record<string, string> = { callsign: name, bio };
+
+      // Upload avatar to Firebase Storage if changed
+      if (avatarFile) {
+        const storageRef = ref(storage, `avatars/${user.uid}`);
+        await uploadBytes(storageRef, avatarFile);
+        const url = await getDownloadURL(storageRef);
+        updates.avatarUrl = url;
+        setProfileImage(url);
+        setAvatarFile(null);
+      }
+
+      await updateDocument(`users/${user.uid}`, updates);
+      setIsEditing(false);
+    } catch (err) {
+      console.warn("Failed to save profile:", err);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -124,39 +168,50 @@ function ProfileEditor() {
       </div>
       
       <div className="grid grid-cols-3 gap-3 pt-4 mb-4 border-t border-white/10">
-        <div className="text-center">
-          <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
-            28
-          </div>
-          <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wide">
-            Days Active
-          </div>
-        </div>
-        <div className="text-center">
-          <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
-            168
-          </div>
-          <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wide">
-            Operations
-          </div>
-        </div>
-        <div className="text-center">
-          <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
-            94%
-          </div>
-          <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wide">
-            Success Rate
-          </div>
-        </div>
+        {(() => {
+          const state = getBehaviorState();
+          const successRate = Math.round(
+            (state.workoutsCompletedThisWeek / Math.max(state.workoutsCompletedThisWeek + state.workoutsSkippedThisWeek, 1)) * 100
+          );
+          return (
+            <>
+              <div className="text-center">
+                <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
+                  {state.streakDays}
+                </div>
+                <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wide">
+                  Day Streak
+                </div>
+              </div>
+              <div className="text-center">
+                <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
+                  {state.totalWorkoutsCompleted}
+                </div>
+                <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wide">
+                  Operations
+                </div>
+              </div>
+              <div className="text-center">
+                <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
+                  {successRate}%
+                </div>
+                <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wide">
+                  Success Rate
+                </div>
+              </div>
+            </>
+          );
+        })()}
       </div>
 
       {isEditing ? (
         <div className="flex gap-2">
-          <button 
+          <button
             onClick={handleSave}
-            className="flex-1 bg-[#ff6600] text-black font-['JetBrains_Mono',monospace] text-[10px] uppercase tracking-wider py-2 hover:bg-[#ff8833] transition-colors"
+            disabled={saving}
+            className="flex-1 bg-[#ff6600] text-black font-['JetBrains_Mono',monospace] text-[10px] uppercase tracking-wider py-2 hover:bg-[#ff8833] transition-colors disabled:opacity-50"
           >
-            Save Changes
+            {saving ? "Saving..." : "Save Changes"}
           </button>
           <button 
             onClick={() => setIsEditing(false)}
@@ -178,15 +233,31 @@ function ProfileEditor() {
 }
 
 function ShareableProgressCard() {
+  const { user } = useAuth();
   const [includeStreak, setIncludeStreak] = useState(true);
   const [includeWorkouts, setIncludeWorkouts] = useState(true);
   const [includeConsistency, setIncludeConsistency] = useState(true);
+  const [callsign, setCallsign] = useState("");
   const cardRef = useRef<HTMLDivElement>(null);
+
+  const state = getBehaviorState();
+  const streak = state.streakDays;
+  const totalOps = state.totalWorkoutsCompleted;
+  const consistency = Math.round(
+    (state.workoutsCompletedThisWeek / Math.max(state.workoutsCompletedThisWeek + state.workoutsSkippedThisWeek, 1)) * 100
+  );
+
+  useEffect(() => {
+    if (!user) return;
+    getDocument<{ callsign?: string }>(`users/${user.uid}`)
+      .then((doc) => { if (doc?.callsign) setCallsign(doc.callsign); })
+      .catch(console.warn);
+  }, [user]);
 
   const handleShare = async () => {
     const shareData = {
       title: 'Training OS - Progress Report',
-      text: `My Training OS Stats:\n${includeStreak ? '• 6 Day Streak\n' : ''}${includeWorkouts ? '• 168 Total Operations\n' : ''}${includeConsistency ? '• 94% Consistency Score' : ''}`,
+      text: `My Training OS Stats:\n${includeStreak ? `• ${streak} Day Streak\n` : ''}${includeWorkouts ? `• ${totalOps} Total Operations\n` : ''}${includeConsistency ? `• ${consistency}% Consistency Score` : ''}`,
       url: window.location.href
     };
 
@@ -254,7 +325,7 @@ function ShareableProgressCard() {
           </div>
 
           <div className="font-['JetBrains_Mono',monospace] text-[16px] text-white font-bold uppercase tracking-wider mb-1">
-            marathonbill
+            {callsign || "operator"}
           </div>
           <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wide mb-5">
             Operator Progress Report
@@ -267,7 +338,7 @@ function ShareableProgressCard() {
                   Current Streak
                 </div>
                 <div className="font-['JetBrains_Mono',monospace] text-[20px] text-[#ff6600] font-bold">
-                  6 <span className="text-[10px] text-white/40">DAYS</span>
+                  {streak} <span className="text-[10px] text-white/40">DAYS</span>
                 </div>
               </div>
             )}
@@ -278,7 +349,7 @@ function ShareableProgressCard() {
                   Total Operations
                 </div>
                 <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
-                  168 <span className="text-[10px] text-white/40">OPS</span>
+                  {totalOps} <span className="text-[10px] text-white/40">OPS</span>
                 </div>
               </div>
             )}
@@ -289,7 +360,7 @@ function ShareableProgressCard() {
                   Consistency Score
                 </div>
                 <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
-                  94<span className="text-[10px] text-white/40">%</span>
+                  {consistency}<span className="text-[10px] text-white/40">%</span>
                 </div>
               </div>
             )}
@@ -297,7 +368,7 @@ function ShareableProgressCard() {
 
           <div className="mt-5 pt-3 border-t border-white/10">
             <div className="font-['JetBrains_Mono',monospace] text-[7px] text-white/30 uppercase tracking-wider text-center">
-              2026.02.10 // Training OS v1.0
+              {new Date().toISOString().split("T")[0].replace(/-/g, ".")} // Training OS v1.0
             </div>
           </div>
         </div>
