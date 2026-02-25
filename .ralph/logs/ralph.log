@@ -1,0 +1,12 @@
+[2026-02-25 13:23:30] [INFO] Setting up tmux session: ralph-1772051009
+[2026-02-25 13:23:30] [SUCCESS] Tmux session created with 3 panes:
+[2026-02-25 13:23:30] [INFO]   Left:         Ralph loop
+[2026-02-25 13:23:30] [INFO]   Right-top:    Claude Code live output
+[2026-02-25 13:23:30] [INFO]   Right-bottom: Status monitor
+[2026-02-25 13:23:30] [INFO] 
+[2026-02-25 13:23:30] [INFO] Use Ctrl+B then D to detach from session
+[2026-02-25 13:23:30] [INFO] Use 'tmux attach -t ralph-1772051009' to reattach
+[2026-02-25 13:23:30] [SUCCESS] 🚀 Ralph loop starting with Claude Code
+[2026-02-25 13:23:30] [INFO] Max calls per hour: 100
+[2026-02-25 13:23:30] [INFO] Logs: .ralph/logs/ | Docs: .ralph/docs/generated/ | Status: .ralph/status.json
+[2026-02-25 13:23:30] [ERROR] Prompt file '.ralph/PROMPT.md' not found!
