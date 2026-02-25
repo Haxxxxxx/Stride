@@ -173,8 +173,8 @@
 - [x] Wire Challenges.tsx to Firestore (join challenge, create/join squad, live data loading, empty states)
 - [ ] Wire ChallengeDetail.tsx leaderboard from real participant data
 - [ ] Wire UserProfileModal to read shared profiles
-- [ ] Create `src/services/notifications.ts` — notification creation helper
-- [ ] Add notification triggers (workout complete, streak milestone, challenge joined)
+- [x] Create `src/services/notifications.ts` — notification creation helper with typed triggers
+- [x] Add notification triggers: workout complete (WorkoutSequenceModal), streak milestone (behaviorStore), challenge joined (Challenges), squad joined (Challenges), program generated (ProgramForging)
 
 ---
 

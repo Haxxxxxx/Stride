@@ -5,6 +5,7 @@ import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { useAuth } from "../../contexts/AuthContext";
 import { setDocument, updateDocument } from "../../../services/firestore";
 import { generateProgram, type PersonalizationData } from "../../../services/programGenerator";
+import { notifyProgramGenerated } from "../../../services/notifications";
 
 type Stage = "saving" | "generating" | "storing" | "done" | "error";
 
@@ -78,6 +79,7 @@ export default function ProgramForging() {
           active: true,
           createdAt: new Date().toISOString(),
         });
+        notifyProgramGenerated(user.uid, program.name).catch(console.warn);
 
         // Done
         setStage("done");

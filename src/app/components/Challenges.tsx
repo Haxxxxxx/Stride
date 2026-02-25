@@ -21,6 +21,7 @@ import {
   getUserSquads,
   getSquadMembers,
 } from "../../services/squads";
+import { notifyChallengeJoined, notifySquadJoined } from "../../services/notifications";
 
 // Join Challenge Modal
 function JoinChallengeModal({
@@ -46,6 +47,7 @@ function JoinChallengeModal({
     try {
       const profile = await getDocument<{ callsign?: string }>(`users/${user.uid}`);
       await joinChallengeService(challenge.id, user.uid, shareProgress, profile?.callsign);
+      notifyChallengeJoined(user.uid, challenge.title).catch(console.warn);
       onJoined();
       onClose();
     } catch (err) {
@@ -285,6 +287,7 @@ function JoinSquadModal({
                   const profile = await getDocument<{ callsign?: string; avatarUrl?: string }>(`users/${user.uid}`);
                   const result = await joinSquadByCode(squadCode.trim(), user.uid, shareProgress, profile?.callsign, profile?.avatarUrl);
                   if (result.success) {
+                    notifySquadJoined(user.uid, squadCode.trim()).catch(console.warn);
                     onJoined();
                     onClose();
                     setSquadCode("");

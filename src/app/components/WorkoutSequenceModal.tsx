@@ -10,6 +10,7 @@ import {
 } from "../utils/behaviorStore";
 import { useAuth } from "../contexts/AuthContext";
 import { setDocument } from "../../services/firestore";
+import { notifyWorkoutComplete } from "../../services/notifications";
 import type { WorkoutDay, Exercise } from "../../services/programGenerator";
 
 interface WorkoutSequenceModalProps {
@@ -172,6 +173,9 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
           completedAt: new Date().toISOString(),
           completionType: currentExerciseIdx >= exercises.length - 1 ? "full" : "partial",
         }).catch(console.warn);
+
+        // Fire notification
+        notifyWorkoutComplete(user.uid, workoutName, timer).catch(console.warn);
       }
 
       // Determine completion type

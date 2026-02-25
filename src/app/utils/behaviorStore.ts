@@ -3,6 +3,7 @@
 // localStorage is the primary cache; Firestore is the persistence layer
 
 import { getDocument, setDocument } from "../../services/firestore";
+import { notifyStreakMilestone, isStreakMilestone } from "../../services/notifications";
 
 export interface BehaviorState {
   // Session tracking
@@ -218,6 +219,12 @@ export function recordHesitation(): BehaviorState {
 export function recordWorkoutCompleted(): BehaviorState {
   const state = getBehaviorState();
   const newStreak = state.streakDays + 1;
+
+  // Fire streak milestone notification
+  if (_authUid && isStreakMilestone(newStreak)) {
+    notifyStreakMilestone(_authUid, newStreak).catch(console.warn);
+  }
+
   return updateBehaviorState({
     workoutsCompletedThisWeek: state.workoutsCompletedThisWeek + 1,
     workoutsCompleted14d: state.workoutsCompleted14d + 1,
