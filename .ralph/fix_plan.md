@@ -125,15 +125,14 @@
   - `setAuthUid()` called from AuthContext on auth state change
   - `syncFromFirestore()` called once on login in AuthContext
 
-### 3.2 Wire Dashboard to live data
-- [ ] In `Dashboard.tsx`:
-  - Read user callsign from Firestore via `subscribeToDocument('users/{uid}')` or a Zustand user store
-  - Read active program from `queryCollection('users/{uid}/programs', where('active', '==', true))`
-  - Derive week overview from program structure + workout logs for current week
-  - Calculate real consistency % from `behaviorStore` data
-  - Show real notification count from unread notifications query
-  - Current day's workout from active program → active protocol display
-  - If no active program exists, show "No active program — generate one" prompt
+### 3.2 Wire Dashboard to live data — DONE
+- [x] In `Dashboard.tsx`:
+  - Read user callsign + avatar from Firestore via `subscribeToDocument`
+  - Read active program from `queryCollection` with `where('active', '==', true)`
+  - Derive week overview from program structure + current week calculation
+  - Calculate real consistency % from behaviorStore
+  - Today's workout derived from active program → active protocol + exercise queue
+  - If no active program, show "No active program" prompt with link to agent
 
 ### 3.3 Wire WorkoutSequenceModal to real data
 - [ ] Accept workout data (exercises array) as props from Dashboard
