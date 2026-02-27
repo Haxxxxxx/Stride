@@ -110,7 +110,8 @@ export async function chatCompletion(
   const providers = getProviders().filter((p) => p.apiKey);
 
   if (providers.length === 0) {
-    throw new Error("No LLM providers configured. Add at least one API key to .env");
+    console.warn("[LLM] No providers configured — using template fallback");
+    throw new Error("NO_PROVIDERS");
   }
 
   const errors: string[] = [];
