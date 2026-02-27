@@ -13,6 +13,7 @@ export default function Verify() {
   const [resent, setResent] = useState(false);
   const [fallbackEmail, setFallbackEmail] = useState("");
   const [needsEmail, setNeedsEmail] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
 
   // Check if user arrived via email link click
   useEffect(() => {
@@ -40,12 +41,20 @@ export default function Verify() {
     }
   }, []);
 
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+
   const handleResend = async () => {
+    if (cooldown > 0) return;
     const targetEmail = email || window.localStorage.getItem("emailForSignIn") || "";
     if (!targetEmail) return;
     try {
       await sendEmailSignInLink(targetEmail);
       setResent(true);
+      setCooldown(30);
     } catch {
       setError("Failed to resend verification link");
     }
@@ -140,9 +149,10 @@ export default function Verify() {
           <span className="text-white/40">Didn't receive the link?</span>
           <button
             onClick={handleResend}
-            className="text-white/60 underline hover:text-[#ff6600] transition-colors text-[10px]"
+            disabled={cooldown > 0}
+            className={`underline transition-colors text-[10px] ${cooldown > 0 ? "text-white/30 cursor-not-allowed" : "text-white/60 hover:text-[#ff6600]"}`}
           >
-            Resend
+            {cooldown > 0 ? `Resend (${cooldown}s)` : "Resend"}
           </button>
         </div>
 
