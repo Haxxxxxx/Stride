@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Timestamp } from "firebase/firestore";
 import { useAuth } from "../contexts/AuthContext";
 import {
   queryCollection,
@@ -12,7 +13,7 @@ interface Notification {
   type: string;
   title: string;
   message: string;
-  createdAt: unknown;
+  createdAt: Timestamp | null;
   read: boolean;
   priority: string;
 }
@@ -227,17 +228,7 @@ export default function Notifications() {
                       {notification.title}
                     </div>
                     <div className="font-['JetBrains_Mono',monospace] text-[9px] text-white/40 uppercase shrink-0">
-                      {notification.createdAt
-                        ? timeAgo(
-                            notification.createdAt instanceof Date
-                              ? notification.createdAt
-                              : typeof notification.createdAt === "object" &&
-                                  notification.createdAt !== null &&
-                                  "toDate" in notification.createdAt
-                                ? (notification.createdAt as { toDate: () => Date }).toDate()
-                                : new Date()
-                          )
-                        : ""}
+                      {notification.createdAt ? timeAgo(notification.createdAt.toDate()) : ""}
                     </div>
                   </div>
 
