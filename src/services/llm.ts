@@ -1,5 +1,5 @@
 // STRIDE LLM Service
-// Provider fallback chain: Groq → Together AI → OpenRouter
+// Provider fallback chain: Ollama (local) → Groq → Together AI → OpenRouter
 // All use OpenAI-compatible chat completions API
 
 export interface LLMMessage {
@@ -21,7 +21,18 @@ interface Provider {
 }
 
 function getProviders(): Provider[] {
+  const ollamaUrl = import.meta.env.VITE_OLLAMA_URL;
+  const ollamaModel = import.meta.env.VITE_OLLAMA_MODEL || "qwen2.5:14b";
+
   return [
+    // Local Ollama — fastest, no rate limits, no cost
+    ...(ollamaUrl ? [{
+      name: "ollama",
+      url: `${ollamaUrl}/v1/chat/completions`,
+      model: ollamaModel,
+      apiKey: "ollama",  // Ollama doesn't validate keys but header is expected
+    }] : []),
+    // Cloud fallbacks
     {
       name: "groq",
       url: "https://api.groq.com/openai/v1/chat/completions",
@@ -50,8 +61,13 @@ async function callProvider(
 ): Promise<string> {
   const { temperature = 0.7, maxTokens = 512, timeoutMs = 30000 } = options;
 
+  // Ollama cold starts can take 30-60s for model loading
+  const effectiveTimeout = provider.name === "ollama"
+    ? Math.max(timeoutMs, 60000)
+    : timeoutMs;
+
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(), effectiveTimeout);
 
   try {
     const res = await fetch(provider.url, {
