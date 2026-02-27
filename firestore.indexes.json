@@ -7,20 +7,6 @@
         { "fieldPath": "read", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
-    },
-    {
-      "collectionGroup": "workoutLogs",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "completedAt", "order": "DESCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "participants",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "progress", "order": "DESCENDING" }
-      ]
     }
   ],
   "fieldOverrides": []
