@@ -1,10 +1,11 @@
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { useOnboardingStore } from "../../../../stores/onboardingStore";
+import { useOnboardingStore, getTotalSteps } from "../../../../stores/onboardingStore";
 
 export default function Step5GoalWeight() {
   const navigate = useNavigate();
-  const { goalWeight, setGoalWeight } = useOnboardingStore();
+  const store = useOnboardingStore();
+  const { goalWeight, setGoalWeight } = store;
 
   const handleContinue = () => {
     if (goalWeight.value) {
@@ -15,7 +16,7 @@ export default function Step5GoalWeight() {
   return (
     <PersonalizationLayout
       step={5}
-      totalSteps={10}
+      totalSteps={getTotalSteps(store)}
       title="Select Target Weight"
       onContinue={handleContinue}
       canContinue={!!goalWeight.value}

@@ -1,12 +1,13 @@
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { useOnboardingStore, type OnboardingState } from "../../../../stores/onboardingStore";
+import { useOnboardingStore, getTotalSteps, type OnboardingState } from "../../../../stores/onboardingStore";
 
 type OptimizationGoal = NonNullable<OnboardingState["optimizationGoal"]>;
 
 export default function Step2Optimization() {
   const navigate = useNavigate();
-  const { optimizationGoal: selected, setOptimizationGoal: setSelected } = useOnboardingStore();
+  const store = useOnboardingStore();
+  const { optimizationGoal: selected, setOptimizationGoal: setSelected } = store;
 
   const options: { value: OptimizationGoal; label: string }[] = [
     { value: "fat-loss", label: "Fat Loss" },
@@ -24,7 +25,7 @@ export default function Step2Optimization() {
   return (
     <PersonalizationLayout
       step={2}
-      totalSteps={10}
+      totalSteps={getTotalSteps(store)}
       title="Primary Objective"
       subtitle="This sets your primary training bias. Everything else adapts around it."
       onContinue={handleContinue}

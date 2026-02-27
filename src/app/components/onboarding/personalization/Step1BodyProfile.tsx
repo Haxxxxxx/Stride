@@ -1,10 +1,11 @@
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { useOnboardingStore } from "../../../../stores/onboardingStore";
+import { useOnboardingStore, getTotalSteps } from "../../../../stores/onboardingStore";
 
 export default function Step1BodyProfile() {
   const navigate = useNavigate();
-  const { bodyProfile: selected, setBodyProfile: setSelected } = useOnboardingStore();
+  const store = useOnboardingStore();
+  const { bodyProfile: selected, setBodyProfile: setSelected } = store;
 
   const handleContinue = () => {
     if (selected) {
@@ -15,7 +16,7 @@ export default function Step1BodyProfile() {
   return (
     <PersonalizationLayout
       step={1}
-      totalSteps={10}
+      totalSteps={getTotalSteps(store)}
       title="Body Profile"
       subtitle="Used to tailor recovery, volume, and load ranges"
       onContinue={handleContinue}

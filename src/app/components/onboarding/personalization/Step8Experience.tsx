@@ -1,10 +1,11 @@
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { useOnboardingStore } from "../../../../stores/onboardingStore";
+import { useOnboardingStore, getTotalSteps, getCurrentStepNumber } from "../../../../stores/onboardingStore";
 
 export default function Step8Experience() {
   const navigate = useNavigate();
-  const { experience: selected, setExperience: setSelected } = useOnboardingStore();
+  const store = useOnboardingStore();
+  const { experience: selected, setExperience: setSelected } = store;
 
   const options: { value: Experience; label: string; description: string }[] = [
     { 
@@ -37,8 +38,8 @@ export default function Step8Experience() {
 
   return (
     <PersonalizationLayout
-      step={8}
-      totalSteps={10}
+      step={getCurrentStepNumber(8, store)}
+      totalSteps={getTotalSteps(store)}
       title="Training Experience"
       subtitle="Used to scale volume, intensity, and recovery."
       onContinue={handleContinue}

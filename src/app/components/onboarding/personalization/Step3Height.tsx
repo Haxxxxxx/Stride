@@ -1,10 +1,11 @@
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { useOnboardingStore } from "../../../../stores/onboardingStore";
+import { useOnboardingStore, getTotalSteps } from "../../../../stores/onboardingStore";
 
 export default function Step3Height() {
   const navigate = useNavigate();
-  const { height, setHeight } = useOnboardingStore();
+  const store = useOnboardingStore();
+  const { height, setHeight } = store;
 
   const handleContinue = () => {
     if (height.value) {
@@ -15,7 +16,7 @@ export default function Step3Height() {
   return (
     <PersonalizationLayout
       step={3}
-      totalSteps={10}
+      totalSteps={getTotalSteps(store)}
       title="Select Height"
       onContinue={handleContinue}
       canContinue={!!height.value}

@@ -1,10 +1,11 @@
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { useOnboardingStore } from "../../../../stores/onboardingStore";
+import { useOnboardingStore, getTotalSteps, getCurrentStepNumber } from "../../../../stores/onboardingStore";
 
 export default function Step7SessionTime() {
   const navigate = useNavigate();
-  const { sessionTime: selected, setSessionTime: setSelected } = useOnboardingStore();
+  const store = useOnboardingStore();
+  const { sessionTime: selected, setSessionTime: setSelected } = store;
 
   const options: { value: SessionTime; label: string }[] = [
     { value: "10-20", label: "10–20 Minutes" },
@@ -20,8 +21,8 @@ export default function Step7SessionTime() {
 
   return (
     <PersonalizationLayout
-      step={7}
-      totalSteps={10}
+      step={getCurrentStepNumber(7, store)}
+      totalSteps={getTotalSteps(store)}
       title="Session Duration"
       subtitle="Choose what you can maintain on your worst week."
       onContinue={handleContinue}

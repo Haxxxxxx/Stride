@@ -1,12 +1,13 @@
 import { useNavigate } from "react-router";
 import PersonalizationLayout from "./PersonalizationLayout";
-import { useOnboardingStore } from "../../../../stores/onboardingStore";
+import { useOnboardingStore, getTotalSteps, getCurrentStepNumber } from "../../../../stores/onboardingStore";
 
 type Constraint = "injury" | "time" | "energy" | "equipment" | "none";
 
 export default function Step6Constraints() {
   const navigate = useNavigate();
-  const { constraints: selected, setConstraints: setSelected } = useOnboardingStore();
+  const store = useOnboardingStore();
+  const { constraints: selected, setConstraints: setSelected } = store;
 
   const options: { value: Constraint; label: string }[] = [
     { value: "injury", label: "Joint Pain or Injury" },
@@ -35,8 +36,8 @@ export default function Step6Constraints() {
 
   return (
     <PersonalizationLayout
-      step={6}
-      totalSteps={10}
+      step={getCurrentStepNumber(6, store)}
+      totalSteps={getTotalSteps(store)}
       title="System Constraints"
       subtitle="This helps the system adapt your plan safely and realistically"
       onContinue={handleContinue}
