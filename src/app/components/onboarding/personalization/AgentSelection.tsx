@@ -64,7 +64,7 @@ export default function AgentSelection() {
     }
   };
 
-  const currentStep = getCurrentStepNumber(12, store);
+  const currentStep = getCurrentStepNumber(13, store);
 
   return (
     <PersonalizationLayout
@@ -72,6 +72,7 @@ export default function AgentSelection() {
       totalSteps={getTotalSteps(store)}
       title="Choose your training agent"
       subtitle="This affects how FORGE pushes, adapts, and holds you accountable."
+      onBack={() => navigate('/onboarding/personalize/gym')}
       onContinue={handleContinue}
       canContinue={selectedAgent !== null}
     >

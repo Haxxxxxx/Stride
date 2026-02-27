@@ -74,6 +74,7 @@ export default function Step9TrainingFocuses() {
       totalSteps={getTotalSteps(store)}
       title="Choose Your Training Focuses"
       subtitle="Select 2-3 focuses in order of importance."
+      onBack={() => navigate('/onboarding/personalize/8')}
       onContinue={handleContinue}
       canContinue={selectedFocuses.length >= 2}
     >
@@ -86,9 +87,9 @@ export default function Step9TrainingFocuses() {
             <button
               key={option.value}
               onClick={() => handleToggle(option.value)}
-              className={`w-full border-2 p-4 flex items-start gap-3 transition-colors relative ${
+              className={`w-full border-2 p-4 flex items-start gap-3 transition-colors relative overflow-visible ${
                 isSelected
-                  ? "border-[#ff6600] bg-[#ff6600]/10"
+                  ? "border-[#ff6600] bg-[#ff6600]/10 mt-2"
                   : "border-white/20 bg-white/5 hover:border-white/40"
               }`}
             >

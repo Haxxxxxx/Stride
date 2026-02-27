@@ -69,6 +69,7 @@ export default function SportSelection() {
       totalSteps={getTotalSteps(store)}
       title="What sport are you training for?"
       subtitle=""
+      onBack={() => navigate('/onboarding/personalize/9')}
       onContinue={handleContinue}
       canContinue={selectedSports.length > 0}
     >

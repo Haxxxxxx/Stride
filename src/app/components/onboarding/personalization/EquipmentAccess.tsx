@@ -39,7 +39,7 @@ export default function EquipmentAccess() {
 
   const handleContinue = () => {
     if (selectedEquipment.length > 0) {
-      navigate("/onboarding/personalize/agent");
+      navigate("/onboarding/personalize/gym");
     }
   };
 
@@ -49,6 +49,7 @@ export default function EquipmentAccess() {
       totalSteps={getTotalSteps(store)}
       title="What equipment do you have access to?"
       subtitle="Select what you can reliably train with each week."
+      onBack={() => navigate(store.trainingFocuses.includes('sport') ? '/onboarding/personalize/sport' : '/onboarding/personalize/9')}
       onContinue={handleContinue}
       canContinue={selectedEquipment.length > 0}
     >

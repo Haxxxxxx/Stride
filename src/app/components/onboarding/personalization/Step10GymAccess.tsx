@@ -40,6 +40,7 @@ export default function Step10GymAccess() {
       totalSteps={getTotalSteps(store)}
       title="Do You Have Access to a Gym?"
       subtitle=""
+      onBack={() => navigate('/onboarding/personalize/equipment')}
       onContinue={handleContinue}
       canContinue={!!selected}
     >
