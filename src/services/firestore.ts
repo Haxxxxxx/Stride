@@ -21,7 +21,7 @@ import { db } from "./firebase";
 // Generic typed get
 export async function getDocument<T = DocumentData>(path: string): Promise<T | null> {
   const snap = await getDoc(doc(db, path));
-  return snap.exists() ? (snap.data() as T) : null;
+  return snap.exists() ? ({ id: snap.id, ...snap.data() } as T) : null;
 }
 
 // Generic typed set (merge by default)
@@ -59,5 +59,18 @@ export function subscribeToDocument<T = DocumentData>(
   });
 }
 
+// Real-time collection listener
+export function subscribeToCollection<T = DocumentData>(
+  collectionPath: string,
+  constraints: QueryConstraint[],
+  callback: (data: T[]) => void
+): Unsubscribe {
+  const q = query(collection(db, collectionPath), ...constraints);
+  return onSnapshot(q, (snap) => {
+    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }) as T));
+  });
+}
+
 // Re-export constraint builders for convenience
 export { where, orderBy, limit, serverTimestamp };
+export { increment } from "firebase/firestore";

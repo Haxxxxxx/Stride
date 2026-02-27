@@ -28,61 +28,76 @@ function Header() {
   );
 }
 
-function WeeklyGrid() {
+function WeeklyGrid({ logs }: { logs: WorkoutLog[] }) {
   const [selectedDay, setSelectedDay] = useState<{week: number; day: number} | null>(null);
-  
-  const weeks = [
-    { week: 1, days: [
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 0, progress: 0 },
-      { status: 0, progress: 0 }
-    ]},
-    { week: 2, days: [
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 }
-    ]},
-    { week: 3, days: [
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 0, progress: 0 }
-    ]},
-    { week: 4, days: [
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 1, progress: 100 },
-      { status: 0.5, progress: 28 },
-      { status: 0, progress: 0 },
-      { status: 0, progress: 0 }
-    ]},
-  ];
+
+  // Build a lookup: "YYYY-MM-DD" → WorkoutLog
+  const logsByDate = new Map<string, WorkoutLog>();
+  for (const log of logs) {
+    const dateKey = new Date(log.completedAt).toISOString().split("T")[0];
+    if (!logsByDate.has(dateKey)) logsByDate.set(dateKey, log);
+  }
+
+  // Build 4-week grid ending at this week (Mon-Sun)
+  const today = new Date();
+  const todayStr = today.toISOString().split("T")[0];
+
+  // Find Monday of the current week
+  const dayOfWeek = today.getDay(); // 0=Sun, 1=Mon, ...
+  const mondayOffset = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  const currentMonday = new Date(today);
+  currentMonday.setDate(today.getDate() - mondayOffset);
+  currentMonday.setHours(0, 0, 0, 0);
+
+  // Start 3 weeks before current Monday
+  const gridStart = new Date(currentMonday);
+  gridStart.setDate(gridStart.getDate() - 21);
+
+  const weeks = Array.from({ length: 4 }, (_, weekIdx) => {
+    const days = Array.from({ length: 7 }, (_, dayIdx) => {
+      const date = new Date(gridStart);
+      date.setDate(gridStart.getDate() + weekIdx * 7 + dayIdx);
+      const dateStr = date.toISOString().split("T")[0];
+      const log = logsByDate.get(dateStr);
+      const isToday = dateStr === todayStr;
+      const isFuture = dateStr > todayStr;
+
+      let status = 0;
+      let progress = 0;
+      if (log) {
+        status = log.completionType === "full" ? 1 : 0.5;
+        progress = log.completionType === "full" ? 100 : 50;
+      } else if (isToday) {
+        status = 0;
+        progress = 0;
+      } else if (isFuture) {
+        status = 0;
+        progress = 0;
+      }
+
+      return { status, progress, dateStr, log };
+    });
+    return { week: weekIdx + 1, days };
+  });
 
   const dayNames = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
   const getDayData = (weekIdx: number, dayIdx: number) => {
-    const mockData = {
-      exercises: [
-        { name: "Bench Press", sets: 4, reps: 8, weight: "185 lbs" },
-        { name: "Squat", sets: 5, reps: 5, weight: "225 lbs" },
-        { name: "Deadlift", sets: 3, reps: 8, weight: "275 lbs" }
-      ],
-      duration: "68 min",
-      volume: "12,450 lbs"
-    };
-    return mockData;
+    const day = weeks[weekIdx]?.days[dayIdx];
+    const log = day?.log;
+    if (log) {
+      return {
+        exercises: log.exercises.map((ex) => ({
+          name: ex.name,
+          sets: ex.sets,
+          reps: ex.reps,
+          weight: ex.rest || "--",
+        })),
+        duration: log.duration > 0 ? `${Math.round(log.duration / 60)} min` : "--",
+        volume: `${log.exercises.reduce((sum, ex) => sum + ex.sets, 0)} sets`,
+      };
+    }
+    return { exercises: [], duration: "--", volume: "--" };
   };
 
   return (
@@ -345,7 +360,7 @@ export default function Progress() {
   return (
     <div className="w-full p-6 pb-24">
       <Header />
-      <WeeklyGrid />
+      <WeeklyGrid logs={logs} />
       <Stats avgDuration={avgDuration} />
       <PerformanceChart logs={logs} />
       <RecentActivity logs={recentLogs} />

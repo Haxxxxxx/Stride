@@ -77,6 +77,9 @@ export interface BehaviorState {
   // Weekly alignment score
   alignmentScore: number;
   lastAlignmentCalculation: number;
+
+  // Weekly reset tracking
+  lastWeeklyReset: number;
 }
 
 const DEFAULT_STATE: BehaviorState = {
@@ -120,6 +123,7 @@ const DEFAULT_STATE: BehaviorState = {
   reflections: [],
   alignmentScore: 50,
   lastAlignmentCalculation: 0,
+  lastWeeklyReset: 0,
 };
 
 const STORE_KEY = "stride_behavior_state";
@@ -132,16 +136,38 @@ export function setAuthUid(uid: string | null): void {
   _authUid = uid;
 }
 
+/** Get the Monday 00:00 UTC timestamp for the week containing `ts` */
+function getWeekNumber(ts: number): number {
+  const d = new Date(ts);
+  const dayOfWeek = d.getUTCDay(); // 0=Sun
+  const mondayOffset = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  d.setUTCDate(d.getUTCDate() - mondayOffset);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
 export function getBehaviorState(): BehaviorState {
+  let state: BehaviorState;
   try {
     const stored = localStorage.getItem(STORE_KEY);
-    if (stored) {
-      return { ...DEFAULT_STATE, ...JSON.parse(stored) };
-    }
+    state = stored ? { ...DEFAULT_STATE, ...JSON.parse(stored) } : { ...DEFAULT_STATE };
   } catch {
-    // fallback to defaults
+    state = { ...DEFAULT_STATE };
   }
-  return { ...DEFAULT_STATE };
+
+  // Auto-reset weekly counters when a new week starts (Monday boundary)
+  const currentWeek = getWeekNumber(Date.now());
+  const lastResetWeek = getWeekNumber(state.lastWeeklyReset || 0);
+  if (currentWeek > lastResetWeek) {
+    state.workoutsCompletedThisWeek = 0;
+    state.workoutsSkippedThisWeek = 0;
+    state.hesitationEvents7d = 0;
+    state.delayLanguageCount7d = 0;
+    state.lastWeeklyReset = Date.now();
+    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  }
+
+  return state;
 }
 
 export function updateBehaviorState(updates: Partial<BehaviorState>): BehaviorState {
@@ -259,7 +285,7 @@ export function recordDelayLanguage(): BehaviorState {
   const state = getBehaviorState();
   return updateBehaviorState({
     delayLanguageCount7d: state.delayLanguageCount7d + 1,
-    chatIntentTags: [...state.chatIntentTags, "delay"],
+    chatIntentTags: [...state.chatIntentTags, "delay"].slice(-100),
   });
 }
 
@@ -268,7 +294,7 @@ export function recordResetEvent(): BehaviorState {
   return updateBehaviorState({
     resetEvents14d: state.resetEvents14d + 1,
     resetEvents30d: state.resetEvents30d + 1,
-    chatIntentTags: [...state.chatIntentTags, "reset"],
+    chatIntentTags: [...state.chatIntentTags, "reset"].slice(-100),
   });
 }
 

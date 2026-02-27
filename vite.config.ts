@@ -24,6 +24,21 @@ export default defineConfig({
     alias: {
       // Alias @ to the src directory
       '@': path.resolve(__dirname, './src'),
+      // Polyfill buffer for Solana wallet-adapter (uses Node.js Buffer)
+      'buffer': 'buffer/',
+    },
+  },
+
+  // Polyfill Node.js globals for Solana wallet-adapter
+  define: {
+    'process.env': {},
+  },
+  optimizeDeps: {
+    include: ["buffer"],
+    esbuildOptions: {
+      define: {
+        global: "globalThis",
+      },
     },
   },
 

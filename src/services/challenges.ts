@@ -7,6 +7,7 @@ import {
   where,
   orderBy,
   serverTimestamp,
+  increment,
 } from "./firestore";
 
 // ── Types ──────────────────────────────────────────────
@@ -78,24 +79,19 @@ export async function joinChallenge(
     callsign: callsign ?? "",
   });
 
-  // Increment participant count
-  const challenge = await getChallenge(challengeId);
-  if (challenge) {
-    await updateDocument(`challenges/${challengeId}`, {
-      participantCount: (challenge.participantCount || 0) + 1,
-    });
-  }
+  // Atomically increment participant count
+  await updateDocument(`challenges/${challengeId}`, {
+    participantCount: increment(1),
+  });
 }
 
 export async function leaveChallenge(challengeId: string, uid: string): Promise<void> {
   await deleteDocument(`challenges/${challengeId}/participants/${uid}`);
 
-  const challenge = await getChallenge(challengeId);
-  if (challenge && challenge.participantCount > 0) {
-    await updateDocument(`challenges/${challengeId}`, {
-      participantCount: challenge.participantCount - 1,
-    });
-  }
+  // Atomically decrement participant count
+  await updateDocument(`challenges/${challengeId}`, {
+    participantCount: increment(-1),
+  });
 }
 
 export async function getChallengeParticipants(

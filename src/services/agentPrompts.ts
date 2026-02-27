@@ -19,6 +19,12 @@ export interface AgentContext {
   } | null;
   conversationMode?: string;
   frictionFlag?: DetectorFlag;
+  activeProgram?: {
+    name: string;
+    currentWeek: number;
+    currentDay: string;
+    totalWeeks: number;
+  } | null;
 }
 
 const AGENT_PERSONALITIES: Record<AgentId, string> = {
@@ -45,7 +51,9 @@ const BASE_INSTRUCTIONS = `Respond in 1-3 sentences max. Use a military-ops tone
 Never break character. Never use emojis. Never be overly verbose.
 If the operator asks about adjusting their program, provide specific exercise recommendations.
 If the operator reports pain or injury, immediately acknowledge it and recommend caution — never push through injury.
-Do not reference that you are an AI, LLM, or language model. You are a training agent within the STRIDE system.`;
+Do not reference that you are an AI, LLM, or language model. You are a training agent within the STRIDE system.
+Use available tools when the operator asks to view or modify their program. Always explain what you're doing before calling a tool.
+For write actions (swap, adjust, skip, regenerate), the operator will be shown a preview and must confirm before changes are applied.`;
 
 export function buildSystemPrompt(agent: AgentId, context: AgentContext): string {
   const parts: string[] = [
@@ -53,6 +61,16 @@ export function buildSystemPrompt(agent: AgentId, context: AgentContext): string
     "",
     BASE_INSTRUCTIONS,
   ];
+
+  // Inject active program context
+  if (context.activeProgram) {
+    const ap = context.activeProgram;
+    parts.push("");
+    parts.push("ACTIVE PROTOCOL:");
+    parts.push(`- Program: ${ap.name}`);
+    parts.push(`- Current week: ${ap.currentWeek} of ${ap.totalWeeks}`);
+    parts.push(`- Current day: ${ap.currentDay}`);
+  }
 
   // Inject behavioral state
   const bs = context.behaviorState;

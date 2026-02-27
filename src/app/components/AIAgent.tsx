@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import svgPaths from "../../imports/svg-oe8cws8da9";
 import { getAgentResponse, containsDelayLanguage, containsResetLanguage } from "../utils/agentLayer";
 import { shouldDeliverFriction } from "../utils/frictionEngine";
@@ -7,11 +7,38 @@ import { recordAgentInteraction, recordDelayLanguage, recordResetEvent, getBehav
 import { chatCompletion, type LLMMessage } from "../../services/llm";
 import { buildSystemPrompt, getAgentWelcome, type AgentId, type AgentContext } from "../../services/agentPrompts";
 import { useAuth } from "../contexts/AuthContext";
-import { getDocument, updateDocument } from "../../services/firestore";
+import { getDocument, updateDocument, queryCollection, where } from "../../services/firestore";
 import { detectMode } from "../utils/agentLayer";
+import { createAgentModel, startAgentChat, type ChatSession, type GenerativeModel } from "../../services/gemini";
+import { executeAction, type ActionProposal } from "../../services/agentActions";
+import type { Program } from "../../services/programGenerator";
+import type { EnhancedGenerateContentResponse } from "firebase/ai";
+
+/** Safely extract text from a Gemini response — returns empty string on failure */
+function safeText(response: EnhancedGenerateContentResponse): string {
+  try {
+    return response.text()?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+interface ProgramWeekData {
+  weekNumber: number;
+  days: Array<{
+    dayNumber: number;
+    name: string;
+    exercises: Array<{
+      name: string;
+      sets: number;
+      reps: string;
+      rest: string;
+    }>;
+  }>;
+}
 
 interface Message {
-  type: 'system' | 'ai' | 'user' | 'plan' | 'friction' | 'pattern';
+  type: 'system' | 'ai' | 'user' | 'plan' | 'friction' | 'pattern' | 'proposal';
   text: string;
   timestamp: string;
   mode?: string;
@@ -19,10 +46,16 @@ interface Message {
     exercises: Array<{
       name: string;
       sets: number;
-      reps: number;
+      reps: number | string;
       rest: string;
+      changed?: boolean;
     }>;
   };
+  programData?: {
+    name: string;
+    weeks: ProgramWeekData[];
+  };
+  proposalId?: string;
 }
 
 type Agent = "atlas" | "orion" | "kade";
@@ -94,6 +127,13 @@ export default function AIAgent() {
       timestamp: "09:41"
     }
   ]);
+
+  // Gemini state
+  const [geminiModel, setGeminiModel] = useState<GenerativeModel | null>(null);
+  const [chatSession, setChatSession] = useState<ChatSession | null>(null);
+  const [pendingProposal, setPendingProposal] = useState<ActionProposal | null>(null);
+  const [activeProgram, setActiveProgram] = useState<(Program & { id: string }) | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const initRef = useRef(false);
@@ -106,47 +146,102 @@ export default function AIAgent() {
     scrollToBottom();
   }, [messages]);
 
-  // Load agent + profile from Firestore on mount
+  const getTimestamp = () => {
+    return new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+  };
+
+  // Build context and initialize Gemini model
+  const initializeGemini = useCallback((
+    agent: Agent,
+    profile: AgentContext["userProfile"],
+    program: (Program & { id: string }) | null,
+  ) => {
+    try {
+      const behaviorState = getBehaviorState();
+      const context: AgentContext = {
+        behaviorState,
+        userProfile: profile,
+        activeProgram: program ? {
+          name: program.name,
+          currentWeek: program.weeks[0]?.weekNumber ?? 1,
+          currentDay: program.weeks[0]?.days[0]?.name ?? "Day 1",
+          totalWeeks: program.weeks.length,
+        } : null,
+      };
+      const systemPrompt = buildSystemPrompt(agent as AgentId, context);
+      const model = createAgentModel(systemPrompt);
+      const session = startAgentChat(model);
+      setGeminiModel(model);
+      setChatSession(session);
+      return session;
+    } catch (err) {
+      console.warn("[AIAgent] Gemini init failed:", err);
+      setGeminiModel(null);
+      setChatSession(null);
+      return null;
+    }
+  }, []);
+
+  // Load agent + profile + active program from Firestore on mount
   useEffect(() => {
     if (!user || initRef.current) return;
     initRef.current = true;
 
     calculateAlignmentScore();
 
-    const loadProfile = async () => {
+    const loadData = async () => {
+      let profile: AgentContext["userProfile"] = null;
+      let program: (Program & { id: string }) | null = null;
+      let agent: Agent = "atlas";
+
       try {
         const data = await getDocument<Record<string, unknown>>(`users/${user.uid}/personalization/data`);
         if (data) {
-          setUserProfile({
+          profile = {
             optimizationGoal: data.optimizationGoal as string,
             experience: data.experience as string,
             constraints: data.constraints as string[],
             sessionTime: data.sessionTime as string,
             trainingFocuses: data.trainingFocuses as string[],
             equipmentAccess: data.equipmentAccess as string,
-          });
+          };
+          setUserProfile(profile);
           if (data.selectedAgent) {
-            const agent = data.selectedAgent as Agent;
+            agent = data.selectedAgent as Agent;
             setCurrentAgent(agent);
             setSelectedAgent(agent);
-            // Set welcome message from actual agent
-            setMessages([
-              { type: "system", text: "COMMAND CHANNEL ESTABLISHED", timestamp: getTimestamp() },
-              { type: "ai", text: getAgentWelcome(agent), timestamp: getTimestamp() },
-            ]);
           }
         }
       } catch (err) {
         console.warn("Failed to load personalization:", err);
       }
+
+      // Load active program
+      try {
+        const programs = await queryCollection<Program & { id: string; active: boolean }>(
+          `users/${user.uid}/programs`,
+          [where("active", "==", true)]
+        );
+        if (programs[0]) {
+          program = programs[0];
+          setActiveProgram(program);
+        }
+      } catch (err) {
+        console.warn("Failed to load active program:", err);
+      }
+
+      // Initialize Gemini with full context
+      initializeGemini(agent, profile, program);
+
+      // Set welcome messages
+      setMessages([
+        { type: "system", text: "COMMAND CHANNEL ESTABLISHED", timestamp: getTimestamp() },
+        { type: "ai", text: getAgentWelcome(agent), timestamp: getTimestamp() },
+      ]);
     };
 
-    loadProfile();
-  }, [user]);
-
-  const getTimestamp = () => {
-    return new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-  };
+    loadData();
+  }, [user, initializeGemini]);
 
   const handleSend = async () => {
     if (!input.trim() || isThinking) return;
@@ -162,107 +257,256 @@ export default function AIAgent() {
     setInput("");
     setIsThinking(true);
 
-    // Record agent interaction
+    // Record agent interaction + detect behavior patterns
     recordAgentInteraction();
-
-    // Check for delay/reset language (for friction engine tracking)
-    if (containsDelayLanguage(userInput)) {
-      recordDelayLanguage();
-    }
-    if (containsResetLanguage(userInput)) {
-      recordResetEvent();
-    }
+    if (containsDelayLanguage(userInput)) recordDelayLanguage();
+    if (containsResetLanguage(userInput)) recordResetEvent();
 
     try {
-      // Detect conversation mode from the input
-      const mode = detectMode(userInput);
-      const behaviorState = getBehaviorState();
+      // Try Gemini first
+      await handleGeminiSend(userInput);
+    } catch (geminiErr) {
+      console.warn("[AIAgent] Gemini failed, trying llm.ts fallback:", geminiErr);
 
-      // Check friction eligibility
-      const frictionDecision = shouldDeliverFriction();
-
-      // Build system prompt with full context
-      const context: AgentContext = {
-        behaviorState,
-        userProfile,
-        conversationMode: mode,
-        frictionFlag: frictionDecision.eligible ? frictionDecision.flag : undefined,
-      };
-      const systemPrompt = buildSystemPrompt(currentAgent as AgentId, context);
-
-      // Build messages for LLM
-      const llmMessages: LLMMessage[] = [
-        { role: "system", content: systemPrompt },
-        ...conversationHistory.slice(-20),
-        { role: "user", content: userInput },
-      ];
-
-      // Try LLM call
-      const response = await chatCompletion(llmMessages, { temperature: 0.8, maxTokens: 256 });
-
-      // Update conversation history
-      setConversationHistory(prev => [
-        ...prev.slice(-18),
-        { role: "user" as const, content: userInput },
-        { role: "assistant" as const, content: response },
-      ]);
-
-      const aiResponse: Message = {
-        type: mode === "patternReflection" ? "pattern" : "ai",
-        text: response,
-        timestamp: getTimestamp(),
-        mode,
-      };
-      setMessages(prev => [...prev, aiResponse]);
-
-      // Deliver friction as separate message if eligible
-      if (frictionDecision.eligible) {
-        setTimeout(() => {
-          const frictionMessage: Message = {
-            type: "friction",
-            text: frictionDecision.response,
-            timestamp: getTimestamp(),
-            mode: `friction:${frictionDecision.flag}`,
-          };
-          setMessages(prev => [...prev, frictionMessage]);
-
-          if (frictionDecision.agent !== currentAgent) {
-            const routingMessage: Message = {
-              type: "system",
-              text: `ROUTING: ${agentData[frictionDecision.agent].name} — ${agentData[frictionDecision.agent].title}`,
-              timestamp: getTimestamp(),
-            };
-            setMessages(prev => [...prev, routingMessage]);
-          }
-        }, 800);
-      }
-    } catch (err) {
-      console.warn("[AIAgent] LLM failed, falling back to agentLayer:", err);
-
-      // Fallback to template-based agentLayer
-      const { mode, response } = getAgentResponse(userInput);
-      const aiResponse: Message = {
-        type: mode === "patternReflection" ? "pattern" : "ai",
-        text: response,
-        timestamp: getTimestamp(),
-        mode,
-      };
-      setMessages(prev => [...prev, aiResponse]);
-
-      // Still check friction on fallback
-      const frictionDecision = shouldDeliverFriction();
-      if (frictionDecision.eligible) {
-        setTimeout(() => {
-          setMessages(prev => [...prev, {
-            type: "friction",
-            text: frictionDecision.response,
-            timestamp: getTimestamp(),
-            mode: `friction:${frictionDecision.flag}`,
-          }]);
-        }, 800);
+      try {
+        // Fallback to llm.ts (Groq/Together/OpenRouter)
+        await handleLLMFallback(userInput);
+      } catch (llmErr) {
+        console.warn("[AIAgent] LLM fallback failed, using agentLayer templates:", llmErr);
+        handleTemplateFallback(userInput);
       }
     } finally {
       setIsThinking(false);
+    }
+  };
+
+  /** Primary: Gemini via Firebase AI Logic with function calling */
+  const handleGeminiSend = async (userInput: string) => {
+    let session = chatSession;
+
+    // Reinitialize if no session
+    if (!session) {
+      session = initializeGemini(currentAgent, userProfile, activeProgram);
+      if (!session) throw new Error("Gemini init failed");
+    }
+
+    const result = await session.sendMessage(userInput);
+    const response = result.response;
+    const functionCalls = response.functionCalls();
+
+    if (functionCalls && functionCalls.length > 0) {
+      // Handle function call
+      const fc = functionCalls[0];
+      const args = (fc.args as Record<string, unknown>) ?? {};
+
+      const actionResult = await executeAction(fc.name, args, user!.uid);
+
+      if (actionResult.type === "data") {
+        // Read action — send result back to Gemini for summary
+        const followUp = await session.sendMessage([{
+          functionResponse: {
+            name: fc.name,
+            response: actionResult.data,
+          },
+        }]);
+
+        const text = safeText(followUp.response) || "Here's your current protocol data.";
+
+        // For getActiveProgram, attach structured program data to the message
+        if (fc.name === "getActiveProgram" && actionResult.data.found && actionResult.data.weeks) {
+          const msg: Message = {
+            type: "ai",
+            text,
+            timestamp: getTimestamp(),
+            programData: {
+              name: actionResult.data.name as string,
+              weeks: actionResult.data.weeks as ProgramWeekData[],
+            },
+          };
+          setMessages(prev => [...prev, msg]);
+        } else {
+          addAgentMessage(text);
+        }
+      } else {
+        // Write action — show proposal for user confirmation
+        const proposal = actionResult.proposal;
+        setPendingProposal(proposal);
+
+        // Add proposal message with exercise preview
+        const proposalMsg: Message = {
+          type: "proposal",
+          text: proposal.description,
+          timestamp: getTimestamp(),
+          planData: {
+            exercises: proposal.preview.exercises.map(e => ({
+              name: e.name,
+              sets: e.sets,
+              reps: e.reps,
+              rest: e.rest,
+              changed: e.changed,
+            })),
+          },
+          proposalId: `proposal-${Date.now()}`,
+        };
+        setMessages(prev => [...prev, proposalMsg]);
+      }
+    } else {
+      // Plain text response
+      const text = safeText(response);
+      if (!text) throw new Error("Empty Gemini response");
+      const mode = detectMode(userInput);
+      addAgentMessage(text, mode);
+    }
+
+    // Friction delivery
+    deliverFriction();
+  };
+
+  /** Secondary fallback: llm.ts providers */
+  const handleLLMFallback = async (userInput: string) => {
+    const mode = detectMode(userInput);
+    const behaviorState = getBehaviorState();
+    const frictionDecision = shouldDeliverFriction();
+
+    const context: AgentContext = {
+      behaviorState,
+      userProfile,
+      conversationMode: mode,
+      frictionFlag: frictionDecision.eligible ? frictionDecision.flag : undefined,
+      activeProgram: activeProgram ? {
+        name: activeProgram.name,
+        currentWeek: activeProgram.weeks[0]?.weekNumber ?? 1,
+        currentDay: activeProgram.weeks[0]?.days[0]?.name ?? "Day 1",
+        totalWeeks: activeProgram.weeks.length,
+      } : null,
+    };
+    const systemPrompt = buildSystemPrompt(currentAgent as AgentId, context);
+
+    const llmMessages: LLMMessage[] = [
+      { role: "system", content: systemPrompt },
+      ...conversationHistory.slice(-20),
+      { role: "user", content: userInput },
+    ];
+
+    const response = await chatCompletion(llmMessages, { temperature: 0.8, maxTokens: 256 });
+
+    setConversationHistory(prev => [
+      ...prev.slice(-18),
+      { role: "user" as const, content: userInput },
+      { role: "assistant" as const, content: response },
+    ]);
+
+    addAgentMessage(response, mode);
+    deliverFriction();
+  };
+
+  /** Final fallback: template-based agentLayer */
+  const handleTemplateFallback = (userInput: string) => {
+    const { mode, response } = getAgentResponse(userInput);
+    addAgentMessage(response, mode);
+    deliverFriction();
+  };
+
+  const addAgentMessage = (text: string, mode?: string) => {
+    const msgType = mode === "patternReflection" ? "pattern" : "ai";
+    setMessages(prev => [...prev, {
+      type: msgType,
+      text,
+      timestamp: getTimestamp(),
+      mode,
+    }]);
+  };
+
+  const deliverFriction = () => {
+    const frictionDecision = shouldDeliverFriction();
+    if (frictionDecision.eligible) {
+      setTimeout(() => {
+        setMessages(prev => [...prev, {
+          type: "friction",
+          text: frictionDecision.response,
+          timestamp: getTimestamp(),
+          mode: `friction:${frictionDecision.flag}`,
+        }]);
+
+        if (frictionDecision.agent !== currentAgent) {
+          setMessages(prev => [...prev, {
+            type: "system",
+            text: `ROUTING: ${agentData[frictionDecision.agent].name} — ${agentData[frictionDecision.agent].title}`,
+            timestamp: getTimestamp(),
+          }]);
+        }
+      }, 800);
+    }
+  };
+
+  /** Confirm a pending write action proposal */
+  const handleConfirmAction = async () => {
+    if (!pendingProposal || !chatSession) return;
+    setIsThinking(true);
+
+    try {
+      // Execute the Firestore write
+      await pendingProposal.execute();
+
+      // Send success back to Gemini so it can confirm in character
+      const followUp = await chatSession.sendMessage([{
+        functionResponse: {
+          name: pendingProposal.actionName,
+          response: { success: true, message: "Changes applied successfully." },
+        },
+      }]);
+
+      const text = safeText(followUp.response) || "Protocol updated. Changes applied.";
+      addAgentMessage(text);
+
+      // System confirmation
+      setMessages(prev => [...prev, {
+        type: "system",
+        text: "PROTOCOL UPDATED",
+        timestamp: getTimestamp(),
+      }]);
+
+      // Refresh active program
+      if (user) {
+        const programs = await queryCollection<Program & { id: string; active: boolean }>(
+          `users/${user.uid}/programs`,
+          [where("active", "==", true)]
+        );
+        if (programs[0]) setActiveProgram(programs[0]);
+      }
+    } catch (err) {
+      console.warn("[AIAgent] Confirm action failed:", err);
+      setMessages(prev => [...prev, {
+        type: "system",
+        text: "ACTION FAILED — protocol unchanged",
+        timestamp: getTimestamp(),
+      }]);
+    } finally {
+      setPendingProposal(null);
+      setIsThinking(false);
+    }
+  };
+
+  /** Reject a pending write action proposal */
+  const handleRejectAction = async () => {
+    if (!pendingProposal) return;
+
+    try {
+      if (chatSession) {
+        const followUp = await chatSession.sendMessage([{
+          functionResponse: {
+            name: pendingProposal.actionName,
+            response: { success: false, message: "Operator rejected the proposed changes." },
+          },
+        }]);
+        const text = safeText(followUp.response) || "Understood. Protocol unchanged.";
+        addAgentMessage(text);
+      }
+    } catch (err) {
+      console.warn("[AIAgent] Reject follow-up failed:", err);
+      addAgentMessage("Understood. Protocol unchanged.");
+    } finally {
+      setPendingProposal(null);
     }
   };
 
@@ -278,8 +522,10 @@ export default function AIAgent() {
   const confirmAgentChange = () => {
     setCurrentAgent(selectedAgent);
     setShowAgentModal(false);
-    // Clear conversation history on agent switch
+    // Clear conversation history + recreate Gemini session
     setConversationHistory([]);
+    setPendingProposal(null);
+    initializeGemini(selectedAgent, userProfile, activeProgram);
     // Add system message for agent switch
     setMessages(prev => [
       ...prev,
@@ -350,7 +596,7 @@ export default function AIAgent() {
                 </div>
               </div>
             )}
-            
+
             {message.type === 'ai' && (
               <div className="border border-white/20 p-3">
                 <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wider mb-2">
@@ -359,6 +605,41 @@ export default function AIAgent() {
                 <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/90 leading-relaxed">
                   {message.text}
                 </div>
+
+                {/* Program data view */}
+                {message.programData && (
+                  <div className="border-t border-white/10 pt-3 mt-3 space-y-3">
+                    <div className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] uppercase tracking-wider">
+                      → {message.programData.name}
+                    </div>
+                    {message.programData.weeks.map((week) => (
+                      <div key={week.weekNumber}>
+                        <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/50 uppercase tracking-wider mb-1.5">
+                          Week {week.weekNumber}
+                        </div>
+                        {week.days.map((day) => (
+                          <div key={day.dayNumber} className="mb-2 ml-2">
+                            <div className="font-['JetBrains_Mono',monospace] text-[8px] text-[#ff6600]/80 uppercase tracking-wide mb-1">
+                              Day {day.dayNumber} — {day.name}
+                            </div>
+                            <div className="space-y-1">
+                              {day.exercises.map((ex, i) => (
+                                <div key={i} className="flex items-center justify-between text-[8px] border-b border-white/5 pb-0.5">
+                                  <span className="font-['JetBrains_Mono',monospace] text-white/70">
+                                    [{(i + 1).toString().padStart(2, '0')}] {ex.name}
+                                  </span>
+                                  <span className="font-['JetBrains_Mono',monospace] text-white/50">
+                                    {ex.sets}x{ex.reps} • {ex.rest}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -370,7 +651,7 @@ export default function AIAgent() {
                 <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/90 leading-relaxed mb-3">
                   {message.text}
                 </div>
-                
+
                 {/* Next Day Preview */}
                 <div className="border-t border-[#ff6600]/30 pt-3 mt-2">
                   <div className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] uppercase tracking-wider mb-2">
@@ -391,7 +672,69 @@ export default function AIAgent() {
                 </div>
               </div>
             )}
-            
+
+            {message.type === 'proposal' && (
+              <div className="border-2 border-[#ff6600] bg-[#ff6600]/5 p-3">
+                <div className="font-['JetBrains_Mono',monospace] text-[8px] text-[#ff6600] uppercase tracking-wider mb-2">
+                  {message.timestamp} • PROPOSED MODIFICATION
+                </div>
+                <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/90 leading-relaxed mb-3">
+                  {message.text}
+                </div>
+
+                {/* Exercise preview table */}
+                <div className="border-t border-[#ff6600]/30 pt-3 mt-2">
+                  <div className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] uppercase tracking-wider mb-2">
+                    → Exercise Preview
+                  </div>
+                  <div className="space-y-2">
+                    {message.planData?.exercises.map((exercise, i) => (
+                      <div
+                        key={i}
+                        className={`flex items-center justify-between text-[9px] border-b border-white/10 pb-1.5 ${
+                          exercise.changed ? "border-l-2 border-l-[#ff6600] pl-2" : ""
+                        }`}
+                      >
+                        <span className="font-['JetBrains_Mono',monospace] text-white/80 flex items-center gap-1.5">
+                          [{(i + 1).toString().padStart(2, '0')}] {exercise.name}
+                          {exercise.changed && (
+                            <span className="text-[7px] text-black bg-[#ff6600] px-1 py-0.5 font-bold">NEW</span>
+                          )}
+                        </span>
+                        <span className="font-['JetBrains_Mono',monospace] text-white/60">
+                          {exercise.sets}x{exercise.reps} • {exercise.rest}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Confirm/Reject buttons — only shown for active proposal */}
+                {pendingProposal && message.proposalId && (
+                  <div className="flex gap-3 pt-3 mt-3 border-t border-[#ff6600]/30">
+                    <button
+                      onClick={handleRejectAction}
+                      disabled={isThinking}
+                      className="flex-1 border border-white/30 py-2 hover:bg-white/5 transition-colors disabled:opacity-50"
+                    >
+                      <span className="font-['JetBrains_Mono',monospace] text-[9px] text-white/70 uppercase tracking-wide">
+                        Reject
+                      </span>
+                    </button>
+                    <button
+                      onClick={handleConfirmAction}
+                      disabled={isThinking}
+                      className="flex-1 border-2 border-[#ff6600] bg-[#ff6600]/10 py-2 hover:bg-[#ff6600]/20 transition-colors disabled:opacity-50"
+                    >
+                      <span className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] uppercase tracking-wide font-bold">
+                        {isThinking ? "Executing..." : "Confirm"}
+                      </span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {message.type === 'user' && (
               <div className="bg-[#ff6600]/10 border border-[#ff6600]/50 p-3">
                 <div className="font-['JetBrains_Mono',monospace] text-[8px] text-[#ff6600]/70 uppercase tracking-wider mb-2">
@@ -446,11 +789,11 @@ export default function AIAgent() {
       <div className="px-4 py-2 border-t border-white/10 shrink-0">
         <div className="flex gap-1.5 overflow-x-auto pb-1">
           {[
+            "Show my program",
             "Recalibrate plan",
             "Report completion",
             "Check streak",
             "High fatigue",
-            "Time constraint",
             "Pain/injury"
           ].map((cmd, idx) => (
             <button
@@ -479,10 +822,12 @@ export default function AIAgent() {
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSend(); } }}
             placeholder="Enter command..."
             className="flex-1 bg-transparent font-['JetBrains_Mono',monospace] text-[11px] text-white outline-none placeholder:text-white/40"
+            disabled={isThinking}
           />
           <button
             onClick={handleSend}
-            className="border border-[#ff6600] px-3 py-1 hover:bg-[#ff6600]/20 transition-colors"
+            disabled={isThinking}
+            className="border border-[#ff6600] px-3 py-1 hover:bg-[#ff6600]/20 transition-colors disabled:opacity-50"
           >
             <span className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] uppercase tracking-wide">
               Send
@@ -502,7 +847,7 @@ export default function AIAgent() {
               backgroundSize: "100% 4px",
             }}
           />
-          
+
           <div className="relative bg-black border-2 border-[#ff6600] p-6 w-full max-w-[340px] max-h-[80vh] overflow-y-auto">
             {/* Header */}
             <div className="mb-6 pb-4 border-b border-white/20">

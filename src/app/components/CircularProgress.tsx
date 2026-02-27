@@ -1,76 +1,67 @@
-// Circular progress SVG paths for different progress percentages
-const svgPaths = {
-  // Full circle outline (background)
-  bgCircle: "M8.97754 0C13.9356 4.22629e-05 17.9551 4.01945 17.9551 8.97754C17.955 13.9356 13.9356 17.955 8.97754 17.9551C4.01945 17.9551 4.22642e-05 13.9356 0 8.97754C0 4.01942 4.01942 0 8.97754 0ZM8.97754 2.1377C5.19993 2.1377 2.1377 5.19993 2.1377 8.97754C2.1378 12.7551 5.19999 15.8174 8.97754 15.8174C12.755 15.8173 15.8173 12.755 15.8174 8.97754C15.8174 5.19998 12.7551 2.13778 8.97754 2.1377Z",
-  
-  // ~25% progress (top quarter)
-  progress25: "M8.97754 2.1377C5.19993 2.1377 2.1377 5.19993 2.1377 8.97754C2.1378 12.6369 5.01125 15.6252 8.625 15.8086L8.97754 15.8174V17.9551C7.79861 17.9551 6.63118 17.7226 5.54199 17.2715C4.45285 16.8203 3.46349 16.1588 2.62988 15.3252C1.79631 14.4916 1.13475 13.5022 0.683594 12.4131C0.232458 11.3239 2.46293e-05 10.1564 0 8.97754C-2.06127e-07 7.79863 0.232454 6.63117 0.683594 5.54199C1.13475 4.4528 1.79625 3.46254 2.62988 2.62891C3.4634 1.79549 4.45302 1.13468 5.54199 0.683594C6.63119 0.232434 7.7986 1.40587e-08 8.97754 0V2.1377Z",
-  
-  // ~50% progress (half circle)
-  progress50: "M8.97735 2.1377C5.19974 2.1377 2.1375 5.19993 2.1375 8.97754C2.13761 12.7551 5.1998 15.8174 8.97735 15.8174C12.7549 15.8173 15.8171 12.755 15.8172 8.97754C15.8172 7.24241 15.17 5.65901 14.1053 4.45312L15.7098 3.03809C17.0678 4.5776 17.8569 6.53694 17.9461 8.58789C18.0351 10.6386 17.4192 12.6582 16.2 14.3096C14.9808 15.961 13.232 17.1443 11.2459 17.6631C9.25962 18.1818 7.15512 18.0047 5.28399 17.1602C3.41287 16.3156 1.88769 14.8551 0.962698 13.0225C0.0377671 11.1899 -0.230847 9.09569 0.200979 7.08887C0.632912 5.08193 1.73968 3.28306 3.33672 1.99316C4.93372 0.703392 6.92456 2.44793e-08 8.97735 0V2.1377Z",
-  
-  // ~75% progress (three quarters)
-  progress75: "M8.97729 2.1377C5.19973 2.13775 2.13745 5.19996 2.13745 8.97754C2.13756 12.755 5.19979 15.8173 8.97729 15.8174C12.6369 15.8174 15.6253 12.9432 15.8083 9.3291L15.8171 8.97754H17.9548C17.9548 10.753 17.4285 12.4886 16.4421 13.9648C15.4557 15.4412 14.0533 16.592 12.4128 17.2715C10.7725 17.9509 8.96765 18.1285 7.22632 17.7822C5.48488 17.4358 3.88515 16.5807 2.62964 15.3252C1.37412 14.0697 0.519004 12.47 0.172607 10.7285C-0.173724 8.98717 0.00393954 7.18231 0.683349 5.54199C1.36283 3.90158 2.51365 2.49915 3.98999 1.5127C5.46625 0.52635 7.20185 2.45077e-05 8.97729 0V2.1377Z",
-  
-  // 100% progress (full circle)
-  progress100: "M8.97754 0C13.9356 7.73129e-05 17.9551 4.01947 17.9551 8.97754C17.955 13.9355 13.9355 17.955 8.97754 17.9551C4.01949 17.9551 0.000101374 13.9356 0 8.97754C0 4.01942 4.01942 0 8.97754 0ZM8.97754 2.1377C5.19993 2.1377 2.1377 5.19993 2.1377 8.97754C2.1378 12.7551 5.19999 15.8174 8.97754 15.8174C12.755 15.8173 15.8173 12.755 15.8174 8.97754C15.8174 5.19997 12.7551 2.13776 8.97754 2.1377Z",
-};
-
 interface CircularProgressProps {
   progress: number; // 0-100
   isComplete?: boolean;
   isActive?: boolean;
 }
 
-export function CircularProgress({ progress, isComplete = false, isActive = false }: CircularProgressProps) {
-  // Determine which progress path to use based on percentage
-  const getProgressPath = (prog: number) => {
-    if (prog >= 100) return svgPaths.progress100;
-    if (prog >= 62.5) return svgPaths.progress75;
-    if (prog >= 37.5) return svgPaths.progress50;
-    if (prog >= 12.5) return svgPaths.progress25;
-    return null;
-  };
+const SIZE = 18;
+const STROKE = 2;
+const RADIUS = (SIZE - STROKE) / 2;
+const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
-  const progressPath = getProgressPath(progress);
-  
-  // Determine colors based on state
-  const bgColor = isComplete ? "white" : isActive ? "#ff6600" : "white";
-  const progressColor = isComplete ? "white" : isActive ? "#ff6600" : "white";
-  const bgOpacity = isComplete ? 0.15 : isActive ? 0.15 : 0.1;
+export function CircularProgress({ progress, isComplete = false, isActive = false }: CircularProgressProps) {
+  const clamped = Math.min(100, Math.max(0, progress));
+  const offset = CIRCUMFERENCE - (clamped / 100) * CIRCUMFERENCE;
+
+  const color = isComplete || isActive ? "#ff6600" : "white";
+  const trackOpacity = isComplete ? 0.15 : isActive ? 0.15 : 0.1;
 
   return (
-    <div className="relative shrink-0 size-[17.955px]">
-      <svg className="block size-full" fill="none" preserveAspectRatio="none" viewBox="0 0 17.9551 17.9551">
-        <g>
-          {/* Background circle */}
-          <path 
-            d={svgPaths.bgCircle} 
-            fill={bgColor}
-            fillOpacity={bgOpacity}
+    <div className="relative shrink-0" style={{ width: SIZE, height: SIZE }}>
+      <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`} className="block -rotate-90">
+        {/* Background track */}
+        <circle
+          cx={SIZE / 2}
+          cy={SIZE / 2}
+          r={RADIUS}
+          fill="none"
+          stroke={color}
+          strokeWidth={STROKE}
+          opacity={trackOpacity}
+        />
+        {/* Progress arc */}
+        {clamped > 0 && (
+          <circle
+            cx={SIZE / 2}
+            cy={SIZE / 2}
+            r={RADIUS}
+            fill="none"
+            stroke={color}
+            strokeWidth={STROKE}
+            strokeDasharray={CIRCUMFERENCE}
+            strokeDashoffset={offset}
+            strokeLinecap="square"
           />
-          {/* Progress arc */}
-          {progressPath && (
-            <path 
-              d={progressPath} 
-              fill={progressColor}
-            />
-          )}
-          {/* Checkmark for completed */}
-          {isComplete && (
-            <g transform="translate(4, 6)">
-              <path 
-                d="M1 4L4 7L9 1" 
-                stroke="white" 
-                strokeWidth="1.5" 
-                strokeLinecap="square" 
-                strokeLinejoin="miter" 
-                fill="none" 
-              />
-            </g>
-          )}
-        </g>
+        )}
       </svg>
+      {/* Checkmark for completed */}
+      {isComplete && (
+        <svg
+          className="absolute inset-0"
+          width={SIZE}
+          height={SIZE}
+          viewBox={`0 0 ${SIZE} ${SIZE}`}
+          fill="none"
+        >
+          <path
+            d="M5.5 9.5L7.5 11.5L12.5 6"
+            stroke="white"
+            strokeWidth="1.5"
+            strokeLinecap="square"
+            strokeLinejoin="miter"
+          />
+        </svg>
+      )}
     </div>
   );
 }

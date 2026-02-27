@@ -1,8 +1,9 @@
 // STRIDE Program Generator
-// Uses LLM to generate personalized training programs from user profile data
-// Falls back to a basic template if LLM fails
+// Uses Gemini via Firebase AI Logic for personalized training programs
+// Falls back to llm.ts providers, then to a basic template if all fail
 
 import { chatCompletionJSON, type LLMMessage } from "./llm";
+import { createProgramModel } from "./gemini";
 
 // ============================================================
 // Types
@@ -49,14 +50,140 @@ export interface PersonalizationData {
 // Program Generation
 // ============================================================
 
-function buildProgramPrompt(data: PersonalizationData): LLMMessage[] {
+function getDaysPerWeek(data: PersonalizationData): number {
+  switch (data.experience) {
+    case "beginner":
+    case "inconsistent":
+      return 3;
+    case "intermediate":
+      return 4;
+    case "advanced":
+      return 5;
+    default:
+      return 4;
+  }
+}
+
+function buildPromptText(data: PersonalizationData): string {
   const durationWeeks = 4;
   const daysPerWeek = getDaysPerWeek(data);
 
+  return `Generate a ${durationWeeks}-week training program for an operator with:
+- Goal: ${data.optimizationGoal || "general conditioning"}
+- Experience: ${data.experience || "intermediate"}
+- Equipment: ${data.equipmentAccess || "full gym"}${data.gymAccess ? ` (${data.gymAccess})` : ""}
+- Session time: ${data.sessionTime || "30-45 min"}
+- Training focuses: ${data.trainingFocuses?.join(", ") || "balanced"}
+- Constraints: ${data.constraints?.length ? data.constraints.join(", ") : "none"}
+${data.sportFocus ? `- Sport focus: ${data.sportFocus}` : ""}
+- Training days per week: ${daysPerWeek}
+
+Rules:
+- Each day should have 4-7 exercises appropriate for the goal
+- Progressive overload: slightly increase volume or intensity each week
+- Include warm-up and cool-down exercises
+- Match exercises to available equipment
+- Keep session within the time constraint
+- Use concise, professional exercise names
+- Give the program a creative military-style name`;
+}
+
+/**
+ * Generate a training program using Gemini (primary) → llm.ts (fallback) → template.
+ */
+export async function generateProgram(data: PersonalizationData): Promise<Program> {
+  // Try Gemini first — native JSON schema output, no parse retries needed
+  try {
+    const model = createProgramModel(
+      "You are a professional fitness program designer for the STRIDE training system. Generate structured training programs in JSON format."
+    );
+    const result = await model.generateContent(buildPromptText(data));
+    const text = result.response.text();
+    const program = JSON.parse(text) as Program;
+
+    if (!program.name || !program.weeks?.length) {
+      throw new Error("Invalid program structure from Gemini");
+    }
+    return program;
+  } catch (geminiErr) {
+    console.warn("[ProgramGenerator] Gemini failed, trying llm.ts fallback:", geminiErr);
+  }
+
+  // Fallback to llm.ts providers
+  try {
+    const messages = buildLLMPrompt(data);
+    const program = await chatCompletionJSON<Program>(messages, {
+      temperature: 0.6,
+      maxTokens: 4096,
+      timeoutMs: 120000,
+    });
+
+    if (!program.name || !program.weeks?.length) {
+      throw new Error("Invalid program structure from LLM");
+    }
+    return program;
+  } catch (llmErr) {
+    console.warn("[ProgramGenerator] LLM fallback failed, using template:", llmErr);
+  }
+
+  return buildFallbackProgram(data);
+}
+
+/**
+ * Generate a single week of workouts (used by regenerateWeek agent action).
+ */
+export async function generateWeek(
+  weekNumber: number,
+  daysCount: number,
+  focus?: string
+): Promise<WorkoutDay[]> {
+  try {
+    const model = createProgramModel(
+      "You are a professional fitness program designer for the STRIDE training system. Generate structured workout days in JSON format."
+    );
+
+    const prompt = `Generate ${daysCount} workout days for week ${weekNumber} of a training program.
+${focus ? `Focus: ${focus}` : "General balanced training."}
+Each day should have 4-7 exercises with progressive overload appropriate for week ${weekNumber}.`;
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+    const parsed = JSON.parse(text);
+
+    // The schema returns a full Program, extract the week's days
+    if (parsed.weeks?.[0]?.days) {
+      return parsed.weeks[0].days;
+    }
+    throw new Error("Unexpected structure");
+  } catch (err) {
+    console.warn("[ProgramGenerator] generateWeek failed, using fallback:", err);
+    // Return simple fallback days
+    return Array.from({ length: daysCount }, (_, i) => ({
+      dayNumber: i + 1,
+      name: `Session ${String.fromCharCode(65 + i)}`,
+      exercises: [
+        { name: "Push-Ups", sets: 3, reps: "15", rest: "60s" },
+        { name: "Bodyweight Squats", sets: 3, reps: "20", rest: "60s" },
+        { name: "Plank Hold", sets: 3, reps: "45s", rest: "45s" },
+        { name: "Lunges", sets: 3, reps: "12 each", rest: "60s" },
+        { name: "Mountain Climbers", sets: 3, reps: "20", rest: "45s" },
+      ],
+    }));
+  }
+}
+
+// ============================================================
+// LLM Fallback Prompt (for llm.ts providers)
+// ============================================================
+
+function buildLLMPrompt(data: PersonalizationData): LLMMessage[] {
   const systemMessage: LLMMessage = {
     role: "system",
     content: `You are a professional fitness program designer for the STRIDE training system. You output ONLY valid JSON. No markdown, no explanation, no code blocks — just the raw JSON object.`,
   };
+
+  const durationWeeks = 4;
+  const daysPerWeek = getDaysPerWeek(data);
 
   const userMessage: LLMMessage = {
     role: "user",
@@ -106,39 +233,6 @@ Rules:
   };
 
   return [systemMessage, userMessage];
-}
-
-function getDaysPerWeek(data: PersonalizationData): number {
-  const time = data.sessionTime || "";
-  if (time.includes("6") || time.includes("7")) return 6;
-  if (time.includes("5")) return 5;
-  if (time.includes("4")) return 4;
-  if (time.includes("2") || time.includes("1")) return 3;
-  return 4; // default
-}
-
-/**
- * Generate a training program using LLM. Falls back to a template on failure.
- */
-export async function generateProgram(data: PersonalizationData): Promise<Program> {
-  try {
-    const messages = buildProgramPrompt(data);
-    const program = await chatCompletionJSON<Program>(messages, {
-      temperature: 0.6,
-      maxTokens: 4096,
-      timeoutMs: 60000,
-    });
-
-    // Validate basic structure
-    if (!program.name || !program.weeks?.length) {
-      throw new Error("Invalid program structure");
-    }
-
-    return program;
-  } catch (err) {
-    console.warn("[ProgramGenerator] LLM failed, using fallback template:", err);
-    return buildFallbackProgram(data);
-  }
 }
 
 // ============================================================
@@ -206,7 +300,6 @@ function buildFallbackProgram(data: PersonalizationData): Program {
       name: `Session ${String.fromCharCode(65 + di)}`,
       exercises: exercisePool[di % exercisePool.length].map((ex) => ({
         ...ex,
-        // Simple progressive overload: +1 rep or set per week
         sets: ex.sets + Math.floor(wi / 2),
       })),
     })),

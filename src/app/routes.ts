@@ -1,14 +1,10 @@
+import { createElement, lazy, Suspense } from "react";
 import { createBrowserRouter } from "react-router";
 import Root from "./components/Root";
 import ProtectedRoute from "./components/ProtectedRoute";
-import Dashboard from "./components/Dashboard";
-import Progress from "./components/Progress";
-import Profile from "./components/Profile";
-import Challenges from "./components/Challenges";
-import ChallengeDetail from "./components/ChallengeDetail";
-import AIAgent from "./components/AIAgent";
-import Notifications from "./components/Notifications";
+import LoadingSkeleton from "./components/LoadingSkeleton";
 import OnboardingLayout from "./components/onboarding/OnboardingLayout";
+import OnboardingGuard from "./components/onboarding/OnboardingGuard";
 import Splashscreen from "./components/onboarding/Splashscreen";
 import Welcome from "./components/onboarding/Welcome";
 import Verify from "./components/onboarding/Verify";
@@ -29,31 +25,54 @@ import EquipmentAccess from "./components/onboarding/personalization/EquipmentAc
 import AgentSelection from "./components/onboarding/personalization/AgentSelection";
 import ProgramForging from "./components/onboarding/ProgramForging";
 
+// Lazy-loaded app screens (code splitting)
+const Dashboard = lazy(() => import("./components/Dashboard"));
+const Progress = lazy(() => import("./components/Progress"));
+const Profile = lazy(() => import("./components/Profile"));
+const Challenges = lazy(() => import("./components/Challenges"));
+const ChallengeDetail = lazy(() => import("./components/ChallengeDetail"));
+const AIAgent = lazy(() => import("./components/AIAgent"));
+const Notifications = lazy(() => import("./components/Notifications"));
+
+/** Wrap a lazy component in Suspense with the LoadingSkeleton fallback */
+function withSuspense(LazyComponent: React.LazyExoticComponent<React.ComponentType>) {
+  return function SuspenseWrapper() {
+    return createElement(Suspense, { fallback: createElement(LoadingSkeleton) }, createElement(LazyComponent));
+  };
+}
+
 export const router = createBrowserRouter([
   {
     path: "/",
     Component: OnboardingLayout,
     children: [
+      // Public routes — no auth required
       { index: true, Component: Splashscreen },
       { path: "onboarding/welcome", Component: Welcome },
       { path: "onboarding/verify", Component: Verify },
-      { path: "onboarding/beta", Component: BetaCode },
-      { path: "onboarding/profile", Component: CreateProfile },
-      { path: "onboarding/personalize/1", Component: Step1BodyProfile },
-      { path: "onboarding/personalize/2", Component: Step2Optimization },
-      { path: "onboarding/personalize/3", Component: Step3Height },
-      { path: "onboarding/personalize/4", Component: Step4Weight },
-      { path: "onboarding/personalize/5", Component: Step5GoalWeight },
-      { path: "onboarding/personalize/6", Component: Step6Constraints },
-      { path: "onboarding/personalize/7", Component: Step7SessionTime },
-      { path: "onboarding/personalize/8", Component: Step8Experience },
-      { path: "onboarding/personalize/9", Component: Step9TrainingFocuses },
-      { path: "onboarding/personalize/10", Component: Step10GymAccess },
-      { path: "onboarding/personalize/sport", Component: SportSelection },
-      { path: "onboarding/personalize/equipment", Component: EquipmentAccess },
-      { path: "onboarding/personalize/gym", Component: Step10GymAccess },
-      { path: "onboarding/personalize/agent", Component: AgentSelection },
-      { path: "onboarding/personalize/forging", Component: ProgramForging },
+
+      // Auth-gated onboarding routes — must be signed in
+      {
+        Component: OnboardingGuard,
+        children: [
+          { path: "onboarding/beta", Component: BetaCode },
+          { path: "onboarding/profile", Component: CreateProfile },
+          { path: "onboarding/personalize/1", Component: Step1BodyProfile },
+          { path: "onboarding/personalize/2", Component: Step2Optimization },
+          { path: "onboarding/personalize/3", Component: Step3Height },
+          { path: "onboarding/personalize/4", Component: Step4Weight },
+          { path: "onboarding/personalize/5", Component: Step5GoalWeight },
+          { path: "onboarding/personalize/6", Component: Step6Constraints },
+          { path: "onboarding/personalize/7", Component: Step7SessionTime },
+          { path: "onboarding/personalize/8", Component: Step8Experience },
+          { path: "onboarding/personalize/9", Component: Step9TrainingFocuses },
+          { path: "onboarding/personalize/sport", Component: SportSelection },
+          { path: "onboarding/personalize/equipment", Component: EquipmentAccess },
+          { path: "onboarding/personalize/gym", Component: Step10GymAccess },
+          { path: "onboarding/personalize/agent", Component: AgentSelection },
+          { path: "onboarding/personalize/forging", Component: ProgramForging },
+        ],
+      },
     ],
   },
   {
@@ -63,13 +82,13 @@ export const router = createBrowserRouter([
       {
         Component: Root,
         children: [
-          { index: true, Component: Dashboard },
-          { path: "progress", Component: Progress },
-          { path: "challenges", Component: Challenges },
-          { path: "challenges/:id", Component: ChallengeDetail },
-          { path: "profile", Component: Profile },
-          { path: "ai-agent", Component: AIAgent },
-          { path: "notifications", Component: Notifications },
+          { index: true, Component: withSuspense(Dashboard) },
+          { path: "progress", Component: withSuspense(Progress) },
+          { path: "challenges", Component: withSuspense(Challenges) },
+          { path: "challenges/:id", Component: withSuspense(ChallengeDetail) },
+          { path: "profile", Component: withSuspense(Profile) },
+          { path: "ai-agent", Component: withSuspense(AIAgent) },
+          { path: "notifications", Component: withSuspense(Notifications) },
         ],
       },
     ],

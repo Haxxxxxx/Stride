@@ -7,6 +7,7 @@ import {
   where,
   orderBy,
   serverTimestamp,
+  increment,
 } from "./firestore";
 
 // ── Types ──────────────────────────────────────────────
@@ -116,23 +117,19 @@ export async function joinSquad(
     avatarUrl: avatarUrl ?? "",
   });
 
-  const squad = await getSquad(squadId);
-  if (squad) {
-    await updateDocument(`squads/${squadId}`, {
-      memberCount: (squad.memberCount || 0) + 1,
-    });
-  }
+  // Atomically increment member count
+  await updateDocument(`squads/${squadId}`, {
+    memberCount: increment(1),
+  });
 }
 
 export async function leaveSquad(squadId: string, uid: string): Promise<void> {
   await deleteDocument(`squads/${squadId}/members/${uid}`);
 
-  const squad = await getSquad(squadId);
-  if (squad && squad.memberCount > 0) {
-    await updateDocument(`squads/${squadId}`, {
-      memberCount: squad.memberCount - 1,
-    });
-  }
+  // Atomically decrement member count
+  await updateDocument(`squads/${squadId}`, {
+    memberCount: increment(-1),
+  });
 }
 
 export async function getSquadMembers(squadId: string): Promise<SquadMember[]> {

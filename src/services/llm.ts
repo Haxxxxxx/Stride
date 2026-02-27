@@ -63,7 +63,7 @@ async function callProvider(
 
   // Ollama cold starts can take 30-60s for model loading
   const effectiveTimeout = provider.name === "ollama"
-    ? Math.max(timeoutMs, 60000)
+    ? Math.max(timeoutMs, 120000)
     : timeoutMs;
 
   const controller = new AbortController();

@@ -5,8 +5,6 @@ export interface OnboardingState {
   // Pre-personalization
   email: string;
   callsign: string;
-  avatarPreview: string | null;
-
   // Personalization steps
   bodyProfile: "woman" | "man" | null;
   optimizationGoal: "fat-loss" | "general-conditioning" | "strength" | "hypertrophy" | null;
@@ -26,7 +24,6 @@ export interface OnboardingState {
 interface OnboardingActions {
   setEmail: (email: string) => void;
   setCallsign: (callsign: string) => void;
-  setAvatarPreview: (preview: string | null) => void;
   setBodyProfile: (value: OnboardingState["bodyProfile"]) => void;
   setOptimizationGoal: (value: OnboardingState["optimizationGoal"]) => void;
   setHeight: (value: OnboardingState["height"]) => void;
@@ -46,7 +43,6 @@ interface OnboardingActions {
 const initialState: OnboardingState = {
   email: "",
   callsign: "",
-  avatarPreview: null,
   bodyProfile: null,
   optimizationGoal: null,
   height: { value: "175", unit: "cm" },
@@ -68,7 +64,6 @@ export const useOnboardingStore = create<OnboardingState & OnboardingActions>()(
       ...initialState,
       setEmail: (email) => set({ email }),
       setCallsign: (callsign) => set({ callsign }),
-      setAvatarPreview: (avatarPreview) => set({ avatarPreview }),
       setBodyProfile: (bodyProfile) => set({ bodyProfile }),
       setOptimizationGoal: (optimizationGoal) => set({ optimizationGoal }),
       setHeight: (height) => set({ height }),

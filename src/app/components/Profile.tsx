@@ -128,23 +128,14 @@ function ProfileEditor() {
         </div>
       </div>
       
-      {/* Email Field */}
+      {/* Email Field (read-only — changing email requires re-authentication) */}
       <div className="mb-4">
         <div className="font-['JetBrains_Mono',monospace] text-[9px] text-white/40 uppercase tracking-wider mb-2">
           Email
         </div>
-        {isEditing ? (
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className="w-full bg-black border border-white/20 font-['JetBrains_Mono',monospace] text-[10px] text-white px-2 py-2"
-          />
-        ) : (
-          <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white">
-            {email}
-          </div>
-        )}
+        <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white">
+          {email}
+        </div>
       </div>
 
       {/* Bio Field */}

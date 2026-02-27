@@ -3,7 +3,7 @@ import { useNavigate } from "react-router";
 import svgPaths from "../../../imports/svg-v0sj4hk01y";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { useAuth } from "../../contexts/AuthContext";
-import { setDocument, updateDocument } from "../../../services/firestore";
+import { setDocument } from "../../../services/firestore";
 import { generateProgram, type PersonalizationData } from "../../../services/programGenerator";
 import { notifyProgramGenerated } from "../../../services/notifications";
 
@@ -25,6 +25,7 @@ export default function ProgramForging() {
   const store = useOnboardingStore();
   const { user } = useAuth();
   const startedRef = useRef(false);
+  const activeInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Run the full pipeline: save profile → generate program → store program
   useEffect(() => {
@@ -57,11 +58,9 @@ export default function ProgramForging() {
           selectedAgent: store.selectedAgent,
         });
 
-        await updateDocument(`users/${user.uid}`, {
+        await setDocument(`users/${user.uid}`, {
           onboardingComplete: true,
         });
-
-        store.reset();
 
         // Stage 2: Generate program via LLM (30-80%)
         setStage("generating");
@@ -81,10 +80,19 @@ export default function ProgramForging() {
         });
         notifyProgramGenerated(user.uid, program.name).catch(console.warn);
 
-        // Done
+        // Done — kill any running animation and snap to 100%
+        if (activeInterval.current) {
+          clearInterval(activeInterval.current);
+          activeInterval.current = null;
+        }
+        store.reset();
         setStage("done");
         setProgress(100);
       } catch (err) {
+        if (activeInterval.current) {
+          clearInterval(activeInterval.current);
+          activeInterval.current = null;
+        }
         console.error("Program forging failed:", err);
         setStage("error");
         setError(err instanceof Error ? err.message : "Unknown error");
@@ -94,18 +102,23 @@ export default function ProgramForging() {
     run();
   }, [user]);
 
-  // Smooth progress animation helper
+  // Smooth progress animation helper — clears any previous interval first
   const animateProgress = (from: number, to: number, durationMs: number) => {
+    if (activeInterval.current) clearInterval(activeInterval.current);
+
+    setProgress(from);
     const steps = Math.ceil(durationMs / 50);
     const increment = (to - from) / steps;
-    let current = from;
     let step = 0;
 
-    const interval = setInterval(() => {
+    activeInterval.current = setInterval(() => {
       step++;
-      current = Math.min(from + increment * step, to);
-      setProgress(current);
-      if (step >= steps) clearInterval(interval);
+      const value = Math.min(from + increment * step, to);
+      setProgress(value);
+      if (step >= steps) {
+        clearInterval(activeInterval.current!);
+        activeInterval.current = null;
+      }
     }, 50);
   };
 

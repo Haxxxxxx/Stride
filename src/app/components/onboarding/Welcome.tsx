@@ -73,7 +73,11 @@ export default function Welcome() {
         setLoading(false);
       });
     }
-  }, [wallet.wallet, wallet.connected, wallet.connecting]);
+    // If modal was opened but no wallet was selected (user dismissed), reset loading
+    if (!wallet.wallet && !walletModal.visible && loading && authInitiated.current) {
+      setLoading(false);
+    }
+  }, [wallet.wallet, wallet.connected, wallet.connecting, walletModal.visible]);
 
   // After wallet connects and publicKey is available, authenticate with Firebase (no signature)
   useEffect(() => {

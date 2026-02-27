@@ -313,25 +313,49 @@ function JoinSquadModal({
 }
 
 // User Profile Modal
-function UserProfileModal({ 
-  isOpen, 
-  onClose, 
-  user 
-}: { 
-  isOpen: boolean; 
+function UserProfileModal({
+  isOpen,
+  onClose,
+  user
+}: {
+  isOpen: boolean;
   onClose: () => void;
-  user: { name: string; avatar: string; sharingProgress: boolean } | null;
+  user: { uid: string; name: string; avatar: string; sharingProgress: boolean } | null;
 }) {
+  const [stats, setStats] = useState<{ streakDays: number; totalWorkoutsCompleted: number; alignmentScore: number } | null>(null);
+  const [recentLogs, setRecentLogs] = useState<{ workoutName: string; completedAt: string }[]>([]);
+
+  useEffect(() => {
+    if (!user?.sharingProgress || !user.uid) return;
+    // Load behavior state
+    getDocument<{ streakDays?: number; totalWorkoutsCompleted?: number; alignmentScore?: number }>(
+      `users/${user.uid}/behaviorState/data`
+    )
+      .then((doc) => {
+        if (doc) setStats({ streakDays: doc.streakDays ?? 0, totalWorkoutsCompleted: doc.totalWorkoutsCompleted ?? 0, alignmentScore: doc.alignmentScore ?? 50 });
+      })
+      .catch(console.warn);
+    // Load recent workout logs
+    import("../../services/firestore").then(({ queryCollection, orderBy, limit }) => {
+      queryCollection<{ workoutName: string; completedAt: string }>(
+        `users/${user.uid}/workoutLogs`,
+        [orderBy("completedAt", "desc"), limit(3)]
+      )
+        .then(setRecentLogs)
+        .catch(console.warn);
+    });
+  }, [user]);
+
   if (!isOpen || !user) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
       {/* Backdrop */}
-      <div 
+      <div
         className="absolute inset-0 bg-black/90"
         onClick={onClose}
       />
-      
+
       {/* Modal */}
       <div className="relative z-10 w-full max-w-md border-2 border-[#ff6600] bg-black p-6">
         {/* Scanline effect */}
@@ -373,7 +397,7 @@ function UserProfileModal({
               <div className="grid grid-cols-2 gap-3">
                 <div className="border border-white/20 p-4">
                   <div className="font-['JetBrains_Mono',monospace] text-[20px] text-[#ff6600] font-bold">
-                    28
+                    {stats?.streakDays ?? 0}
                   </div>
                   <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider">
                     Day Streak
@@ -381,7 +405,7 @@ function UserProfileModal({
                 </div>
                 <div className="border border-white/20 p-4">
                   <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
-                    142
+                    {stats?.totalWorkoutsCompleted ?? 0}
                   </div>
                   <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider">
                     Total Sessions
@@ -389,18 +413,18 @@ function UserProfileModal({
                 </div>
                 <div className="border border-white/20 p-4">
                   <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
-                    92%
+                    {stats?.alignmentScore ?? 50}%
                   </div>
                   <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider">
-                    Consistency
+                    Alignment
                   </div>
                 </div>
                 <div className="border border-white/20 p-4">
                   <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
-                    3.2K
+                    {recentLogs.length}
                   </div>
                   <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider">
-                    Total XP
+                    Recent Ops
                   </div>
                 </div>
               </div>
@@ -411,23 +435,21 @@ function UserProfileModal({
                   Recent Activity
                 </div>
                 <div className="space-y-2">
-                  {[
-                    { module: "Upper Body Protocol", date: "Today", status: "complete" },
-                    { module: "Core Calibration", date: "Yesterday", status: "complete" },
-                    { module: "Lower Body Protocol", date: "2 days ago", status: "complete" },
-                  ].map((activity, idx) => (
+                  {recentLogs.length > 0 ? recentLogs.map((log, idx) => (
                     <div key={idx} className="flex items-center justify-between py-2 border-b border-white/10 last:border-0">
                       <div>
                         <div className="font-['JetBrains_Mono',monospace] text-[9px] text-white">
-                          {activity.module}
+                          {log.workoutName}
                         </div>
                         <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40">
-                          {activity.date}
+                          {new Date(log.completedAt).toLocaleDateString()}
                         </div>
                       </div>
                       <div className="size-2 bg-[#ff6600]" />
                     </div>
-                  ))}
+                  )) : (
+                    <div className="font-['JetBrains_Mono',monospace] text-[9px] text-white/40">No recent activity</div>
+                  )}
                 </div>
               </div>
             </div>
@@ -440,7 +462,7 @@ function UserProfileModal({
               <div className="font-['JetBrains_Mono',monospace] text-[9px] text-white/40 mb-6">
                 This operator has not shared their detailed progress metrics with the squad.
               </div>
-              
+
               {/* Public Stats Only */}
               <div className="border border-white/20 p-4 inline-block">
                 <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider mb-2">
@@ -448,9 +470,6 @@ function UserProfileModal({
                 </div>
                 <div className="font-['JetBrains_Mono',monospace] text-[16px] text-white font-bold">
                   Active Member
-                </div>
-                <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 mt-1">
-                  Joined 3 weeks ago
                 </div>
               </div>
             </div>
@@ -470,7 +489,7 @@ export default function Challenges() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showJoinSquadModal, setShowJoinSquadModal] = useState(false);
   const [showJoinModal, setShowJoinModal] = useState(false);
-  const [showProfileModal, setShowProfileModal] = useState<{ name: string; avatar: string; sharingProgress: boolean } | null>(null);
+  const [showProfileModal, setShowProfileModal] = useState<{ uid: string; name: string; avatar: string; sharingProgress: boolean } | null>(null);
 
   // Live data
   const [challenges, setChallenges] = useState<Challenge[]>([]);

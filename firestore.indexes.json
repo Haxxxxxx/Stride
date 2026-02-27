@@ -19,7 +19,7 @@
       "collectionGroup": "participants",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "odProgress", "order": "DESCENDING" }
+        { "fieldPath": "progress", "order": "DESCENDING" }
       ]
     }
   ],

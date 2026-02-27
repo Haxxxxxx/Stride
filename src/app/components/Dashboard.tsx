@@ -8,8 +8,14 @@ import { SystemMessage } from "./SystemMessage";
 import { getRandomMessage, getStreakMilestoneMessage } from "../utils/microLanguage";
 import { getBehaviorState, recordLogin } from "../utils/behaviorStore";
 import { useAuth } from "../contexts/AuthContext";
-import { subscribeToDocument, queryCollection, where } from "../../services/firestore";
+import { subscribeToDocument, queryCollection, where, orderBy } from "../../services/firestore";
 import type { Program, WorkoutDay } from "../../services/programGenerator";
+
+interface DashboardWorkoutLog {
+  id: string;
+  completedAt: string;
+  completionType: string;
+}
 
 function Avatar() {
   return (
@@ -21,7 +27,7 @@ function Avatar() {
   );
 }
 
-function TopBar({ callsign, avatarUrl }: { callsign: string; avatarUrl?: string }) {
+function TopBar({ callsign, avatarUrl, unreadCount }: { callsign: string; avatarUrl?: string; unreadCount: number }) {
   return (
     <div className="content-stretch flex items-center justify-between relative shrink-0 w-full pb-4 border-b border-white/10">
       <div className="content-stretch flex gap-[12px] items-center relative shrink-0">
@@ -47,7 +53,7 @@ function TopBar({ callsign, avatarUrl }: { callsign: string; avatarUrl?: string 
       <div className="content-stretch flex gap-[12px] h-[44px] items-center justify-center relative shrink-0">
         <Link to="/app/notifications" className="bg-black border border-white/30 content-stretch flex gap-[6px] items-center px-[10px] py-[6px] relative shrink-0 hover:border-[#ff6600] transition-colors">
           <div className="flex flex-col font-['JetBrains_Mono',monospace] font-medium justify-center leading-[0] relative shrink-0 text-[12px] text-center text-[#ff6600] whitespace-nowrap tracking-wider">
-            <p className="leading-[1.2]">0</p>
+            <p className="leading-[1.2]">{unreadCount}</p>
           </div>
           <div className="relative shrink-0 size-[14px]">
             <svg className="block size-full" fill="none" preserveAspectRatio="none" viewBox="0 0 16 16">
@@ -129,7 +135,7 @@ function SystemStatus() {
   );
 }
 
-function WeekOverview({ programName, currentWeek, todayDayIndex }: { programName: string; currentWeek: number; todayDayIndex: number }) {
+function WeekOverview({ programName, currentWeek, todayDayIndex, weekLogs }: { programName: string; currentWeek: number; todayDayIndex: number; weekLogs: Map<string, DashboardWorkoutLog> }) {
   const DAY_LABELS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
   const now = new Date();
   // Calculate the Monday of the current week
@@ -140,14 +146,19 @@ function WeekOverview({ programName, currentWeek, todayDayIndex }: { programName
   const days = DAY_LABELS.map((label, i) => {
     const d = new Date(monday);
     d.setDate(monday.getDate() + i);
+    const dateStr = d.toISOString().split("T")[0];
     const isPast = i < todayDayIndex;
     const isToday = i === todayDayIndex;
+    const log = weekLogs.get(dateStr);
+    const hasLog = !!log;
+    const isFullComplete = log?.completionType === "full";
+
     return {
       day: label,
       date: d.getDate().toString(),
-      complete: isPast,
+      complete: hasLog && isFullComplete,
       active: isToday,
-      progress: isPast ? 100 : isToday ? 28 : 0,
+      progress: hasLog ? (isFullComplete ? 100 : 50) : 0,
     };
   });
 
@@ -202,7 +213,7 @@ function ActiveOperation({ onOpenModal, todayWorkout }: { onOpenModal: () => voi
           No active program. Complete onboarding to generate your training protocol.
         </div>
         <Link
-          to="/app/agent"
+          to="/app/ai-agent"
           className="block w-full border border-[#ff6600] text-center text-[#ff6600] font-['JetBrains_Mono',monospace] text-[11px] font-bold uppercase tracking-wider py-3 hover:bg-[#ff6600]/10 transition-colors"
         >
           Talk to Agent →
@@ -325,6 +336,8 @@ export default function Dashboard() {
   const [callsign, setCallsign] = useState("Operator");
   const [avatarUrl, setAvatarUrl] = useState<string | undefined>();
   const [activeProgram, setActiveProgram] = useState<(Program & { id?: string; createdAt?: string }) | null>(null);
+  const [weekLogs, setWeekLogs] = useState<Map<string, DashboardWorkoutLog>>(new Map());
+  const [unreadCount, setUnreadCount] = useState(0);
 
   // Subscribe to user profile for callsign
   useEffect(() => {
@@ -336,6 +349,38 @@ export default function Dashboard() {
       }
     });
     return unsub;
+  }, [user]);
+
+  // Load unread notification count
+  useEffect(() => {
+    if (!user) return;
+    queryCollection<{ id: string }>(
+      `users/${user.uid}/notifications`,
+      [where("read", "==", false)]
+    ).then((docs) => setUnreadCount(docs.length)).catch(console.warn);
+  }, [user]);
+
+  // Load this week's workout logs for week overview
+  useEffect(() => {
+    if (!user) return;
+    const now = new Date();
+    const mondayOffset = (now.getDay() + 6) % 7;
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - mondayOffset);
+    monday.setHours(0, 0, 0, 0);
+    const mondayStr = monday.toISOString().split("T")[0];
+
+    queryCollection<DashboardWorkoutLog>(
+      `users/${user.uid}/workoutLogs`,
+      [where("completedAt", ">=", mondayStr), orderBy("completedAt", "asc")]
+    ).then((logs) => {
+      const map = new Map<string, DashboardWorkoutLog>();
+      for (const log of logs) {
+        const dateKey = new Date(log.completedAt).toISOString().split("T")[0];
+        if (!map.has(dateKey)) map.set(dateKey, log);
+      }
+      setWeekLogs(map);
+    }).catch(console.warn);
   }, [user]);
 
   // Load active program
@@ -374,7 +419,7 @@ export default function Dashboard() {
 
   return (
     <div className="w-full p-6 pb-24 space-y-6">
-      <TopBar callsign={callsign} avatarUrl={avatarUrl} />
+      <TopBar callsign={callsign} avatarUrl={avatarUrl} unreadCount={unreadCount} />
 
       {/* Login Trigger Message */}
       {showLoginMessage && loginMessage && (
@@ -400,6 +445,7 @@ export default function Dashboard() {
         programName={activeProgram?.name ?? ""}
         currentWeek={currentWeek}
         todayDayIndex={todayDayIndex}
+        weekLogs={weekLogs}
       />
       <ActiveOperation onOpenModal={() => setIsModalOpen(true)} todayWorkout={todayWorkout} />
       <OperationsList todayWorkout={todayWorkout} />

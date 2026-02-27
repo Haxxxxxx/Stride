@@ -1,8 +1,28 @@
+import { useEffect } from "react";
 import { useNavigate } from "react-router";
 import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.png";
+import { useAuth } from "../../contexts/AuthContext";
+import { getDocument } from "../../../services/firestore";
 
 export default function Splashscreen() {
   const navigate = useNavigate();
+  const { user, loading } = useAuth();
+
+  // If user is already authenticated, route them to the right place
+  useEffect(() => {
+    if (loading || !user) return;
+    getDocument<{ onboardingComplete?: boolean }>(`users/${user.uid}`)
+      .then((doc) => {
+        if (doc?.onboardingComplete) {
+          navigate("/app", { replace: true });
+        } else {
+          navigate("/onboarding/beta", { replace: true });
+        }
+      })
+      .catch(() => {
+        // Firestore read failed, let them proceed normally
+      });
+  }, [user, loading]);
 
   return (
     <div className="relative size-full bg-black flex items-center justify-center overflow-hidden">
@@ -11,16 +31,6 @@ export default function Splashscreen() {
         backgroundImage: `repeating-linear-gradient(0deg, transparent, transparent 1px, white 2px, white 2px)`,
         backgroundSize: '100% 4px'
       }} />
-
-      {/* Dev Bypass Button — only visible in development */}
-      {import.meta.env.DEV && (
-        <button
-          onClick={() => navigate('/app')}
-          className="absolute top-4 right-4 z-50 border border-white/20 px-3 py-1 font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase hover:border-[#ff6600] hover:text-[#ff6600] transition-colors"
-        >
-          Dev Bypass →
-        </button>
-      )}
 
       <div className="relative z-10 flex flex-col items-center justify-center gap-12 p-6">
         {/* Logo */}
