@@ -1,43 +1,41 @@
 import image_649dc395704951058b9543ab59c196ca800a5539 from 'figma:asset/649dc395704951058b9543ab59c196ca800a5539.png'
 import image_ed2679aab5c84af8a717c4d8b5f3c6d516a31e51 from 'figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.png'
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
+import { useWallet } from "@solana/wallet-adapter-react";
+import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.png";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
-import { signUpWithEmail, signInWithEmail, signInWithGoogle } from "../../../services/auth";
+import { useAuth } from "../../contexts/AuthContext";
+import { sendEmailSignInLink, signInWithGoogle, signInWithWallet } from "../../../services/auth";
 
 export default function Welcome() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { email, setEmail } = useOnboardingStore();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  // Track whether the user initiated auth on this page (vs stale session)
+  const authInitiated = useRef(false);
 
   const handleContinue = async () => {
     if (!email) return;
+    if (!/.+@.+\..+/.test(email)) {
+      setError("Please enter a valid email address");
+      return;
+    }
     setError("");
     setLoading(true);
 
     try {
-      const tempPassword = `Stride_${email.split("@")[0]}_2026!`;
-      try {
-        await signUpWithEmail(email, tempPassword);
-      } catch (err: unknown) {
-        const firebaseErr = err as { code?: string };
-        if (firebaseErr.code === "auth/email-already-in-use") {
-          await signInWithEmail(email, tempPassword);
-        } else {
-          throw err;
-        }
-      }
+      await sendEmailSignInLink(email);
       navigate("/onboarding/verify");
     } catch (err: unknown) {
       const firebaseErr = err as { code?: string; message?: string };
       if (firebaseErr.code === "auth/invalid-email") {
         setError("Invalid email address");
-      } else if (firebaseErr.code === "auth/wrong-password" || firebaseErr.code === "auth/invalid-credential") {
-        navigate("/onboarding/verify");
       } else {
-        setError(firebaseErr.message || "Authentication failed");
+        setError(firebaseErr.message || "Failed to send verification link");
       }
     } finally {
       setLoading(false);
@@ -47,16 +45,58 @@ export default function Welcome() {
   const handleGoogleSignIn = async () => {
     setError("");
     setLoading(true);
+    authInitiated.current = true;
     try {
       const result = await signInWithGoogle();
-      setEmail(result.user.email || "");
-      navigate("/onboarding/verify");
+      // result is null when redirect flow is used (mobile)
+      if (result) {
+        setEmail(result.user.email || "");
+        navigate("/onboarding/beta");
+      }
     } catch (err: unknown) {
       const firebaseErr = err as { message?: string };
       setError(firebaseErr.message || "Google sign-in failed");
     } finally {
       setLoading(false);
     }
+  };
+
+  const wallet = useWallet();
+  const walletModal = useWalletModal();
+
+  // When user selects a wallet from the modal, trigger connect()
+  useEffect(() => {
+    if (wallet.wallet && !wallet.connected && !wallet.connecting) {
+      wallet.connect().catch((err: unknown) => {
+        const e = err as { message?: string };
+        setError(e.message || "Wallet connection failed");
+        setLoading(false);
+      });
+    }
+  }, [wallet.wallet, wallet.connected, wallet.connecting]);
+
+  // After wallet connects and publicKey is available, authenticate with Firebase (no signature)
+  useEffect(() => {
+    if (!wallet.publicKey) return;
+    const pubkey = wallet.publicKey.toBase58();
+    setLoading(true);
+    signInWithWallet(pubkey)
+      .then(() => {
+        navigate("/onboarding/beta");
+      })
+      .catch((err: unknown) => {
+        const e = err as { message?: string };
+        setError(e.message || "Wallet authentication failed");
+      })
+      .finally(() => setLoading(false));
+  }, [wallet.publicKey]);
+
+  const handleWalletConnect = () => {
+    setError("");
+    setLoading(true);
+    authInitiated.current = true;
+    // Open the wallet selector modal — user picks from installed browser wallets
+    walletModal.setVisible(true);
   };
 
   return (
@@ -138,8 +178,9 @@ export default function Welcome() {
 
           {/* Wallet Connect Button */}
           <button
-            onClick={() => setError("Wallet connect coming soon")}
-            className="w-full border border-white/20 py-3 font-['JetBrains_Mono',monospace] text-[10px] text-white uppercase tracking-wider hover:border-[#ff6600] hover:bg-white/5 transition-colors flex items-center justify-center gap-2"
+            onClick={handleWalletConnect}
+            disabled={loading}
+            className="w-full border border-white/20 py-3 font-['JetBrains_Mono',monospace] text-[10px] text-white uppercase tracking-wider hover:border-[#ff6600] hover:bg-white/5 transition-colors flex items-center justify-center gap-2 disabled:opacity-30"
           >
             <svg className="size-4" fill="none" viewBox="0 0 18 18">
               <path
