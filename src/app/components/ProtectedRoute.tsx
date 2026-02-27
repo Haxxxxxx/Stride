@@ -29,7 +29,7 @@ export default function ProtectedRoute() {
       });
 
     return () => { cancelled = true; };
-  }, [user]);
+  }, [user?.uid]);
 
   if (loading || (user && !onboardingChecked)) {
     return (
