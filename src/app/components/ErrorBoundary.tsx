@@ -18,7 +18,9 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error("[STRIDE] Screen error:", error, info.componentStack);
+    if (import.meta.env.DEV) {
+      console.error("[STRIDE] Screen error:", error, info.componentStack);
+    }
   }
 
   handleRetry = () => {
