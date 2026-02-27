@@ -1,24 +1,31 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.png";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { useAuth } from "../../contexts/AuthContext";
 import { setDocument } from "../../../services/firestore";
+import { storage } from "../../../services/firebase";
 
 export default function CreateProfile() {
   const navigate = useNavigate();
-  const { callsign, setCallsign, avatarPreview, setAvatarPreview } = useOnboardingStore();
+  const { callsign, setCallsign } = useOnboardingStore();
   const { user } = useAuth();
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  const avatarFileRef = useRef<File | null>(null);
+
+  useEffect(() => {
+    return () => { if (avatarPreview) URL.revokeObjectURL(avatarPreview); };
+  }, [avatarPreview]);
 
   const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setAvatarPreview(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+      avatarFileRef.current = file;
+      if (avatarPreview) URL.revokeObjectURL(avatarPreview);
+      setAvatarPreview(URL.createObjectURL(file));
     }
   };
 
@@ -27,18 +34,26 @@ export default function CreateProfile() {
     setSaving(true);
 
     try {
+      let avatarUrl: string | null = null;
+
+      // Upload avatar to Firebase Storage if selected
+      if (user && avatarFileRef.current) {
+        const storageRef = ref(storage, `avatars/${user.uid}`);
+        await uploadBytes(storageRef, avatarFileRef.current);
+        avatarUrl = await getDownloadURL(storageRef);
+      }
+
       if (user) {
         await setDocument(`users/${user.uid}`, {
           callsign,
-          avatarUrl: avatarPreview || null,
+          avatarUrl,
           createdAt: new Date().toISOString(),
           onboardingComplete: false,
         });
       }
       navigate('/onboarding/personalize/1');
     } catch {
-      // Still navigate even if Firestore write fails — data is in the store
-      navigate('/onboarding/personalize/1');
+      setError("Failed to save profile. Check your connection and try again.");
     } finally {
       setSaving(false);
     }
@@ -113,6 +128,12 @@ export default function CreateProfile() {
             />
           </div>
         </div>
+
+        {error && (
+          <div className="font-['JetBrains_Mono',monospace] text-[9px] text-red-500 text-center -mt-6">
+            {error}
+          </div>
+        )}
 
         {/* Continue Button */}
         <button
