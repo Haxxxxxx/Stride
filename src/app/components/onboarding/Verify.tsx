@@ -1,42 +1,71 @@
 import image_ed2679aab5c84af8a717c4d8b5f3c6d516a31e51 from 'figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.png'
-import { useState, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
 import imgRectangle7 from "figma:asset/dc33bf4dcbc192d6dda86d23d93b5f6dced4ef05.png";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
+import { isEmailSignInLink, completeEmailSignIn, sendEmailSignInLink } from "../../../services/auth";
 
 export default function Verify() {
-  const { email } = useOnboardingStore();
+  const { email, setEmail } = useOnboardingStore();
   const navigate = useNavigate();
-  const [code, setCode] = useState(["", "", "", "", "", ""]);
-  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const [status, setStatus] = useState<"waiting" | "completing" | "success" | "error">("waiting");
+  const [error, setError] = useState("");
+  const [resent, setResent] = useState(false);
+  const [fallbackEmail, setFallbackEmail] = useState("");
+  const [needsEmail, setNeedsEmail] = useState(false);
 
-  const handleChange = (index: number, value: string) => {
-    if (value.length > 1) return;
-    
-    const newCode = [...code];
-    newCode[index] = value;
-    setCode(newCode);
+  // Check if user arrived via email link click
+  useEffect(() => {
+    if (isEmailSignInLink(window.location.href)) {
+      setStatus("completing");
+      const storedEmail = email || window.localStorage.getItem("emailForSignIn") || "";
+      if (!storedEmail) {
+        // Edge case: link opened in different browser — prompt for email
+        setNeedsEmail(true);
+        setError("Please enter your email to complete sign-in");
+        setStatus("error");
+        return;
+      }
+      completeEmailSignIn(storedEmail, window.location.href)
+        .then(() => {
+          window.localStorage.removeItem("emailForSignIn");
+          setStatus("success");
+          navigate("/onboarding/beta");
+        })
+        .catch((err: unknown) => {
+          const firebaseErr = err as { message?: string };
+          setError(firebaseErr.message || "Sign-in link expired or invalid");
+          setStatus("error");
+        });
+    }
+  }, []);
 
-    // Auto-focus next input
-    if (value && index < 5) {
-      inputRefs.current[index + 1]?.focus();
+  const handleResend = async () => {
+    const targetEmail = email || window.localStorage.getItem("emailForSignIn") || "";
+    if (!targetEmail) return;
+    try {
+      await sendEmailSignInLink(targetEmail);
+      setResent(true);
+    } catch {
+      setError("Failed to resend verification link");
     }
   };
 
-  const handleKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Backspace' && !code[index] && index > 0) {
-      inputRefs.current[index - 1]?.focus();
+  const handleFallbackSubmit = async () => {
+    if (!fallbackEmail || !isEmailSignInLink(window.location.href)) return;
+    setStatus("completing");
+    setError("");
+    try {
+      await completeEmailSignIn(fallbackEmail, window.location.href);
+      window.localStorage.removeItem("emailForSignIn");
+      setStatus("success");
+      navigate("/onboarding/beta");
+    } catch (err: unknown) {
+      const firebaseErr = err as { message?: string };
+      setError(firebaseErr.message || "Sign-in link expired or invalid");
+      setStatus("error");
     }
   };
-
-  const handleVerify = () => {
-    const fullCode = code.join('');
-    if (fullCode.length === 6) {
-      navigate('/onboarding/beta');
-    }
-  };
-
-  const isComplete = code.every(digit => digit !== "");
 
   return (
     <div className="relative size-full bg-black flex items-center justify-center overflow-hidden">
@@ -57,45 +86,72 @@ export default function Verify() {
             />
           </div>
           <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold uppercase tracking-wider text-center">
-            Verification Code
+            {status === "completing" ? "Verifying..." : "Check Your Email"}
           </div>
           <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/60 text-center">
-            We sent a 6-digit code to {email || "your email address"}
+            {status === "completing"
+              ? "Completing sign-in..."
+              : `We sent a sign-in link to ${email || window.localStorage.getItem("emailForSignIn") || "your email"}`}
           </div>
         </div>
 
-        {/* Code Input */}
-        <div className="flex gap-2 w-full justify-center">
-          {code.map((digit, index) => (
-            <input
-              key={index}
-              ref={(el) => (inputRefs.current[index] = el)}
-              type="text"
-              inputMode="numeric"
-              maxLength={1}
-              value={digit}
-              onChange={(e) => handleChange(index, e.target.value.replace(/[^0-9]/g, ''))}
-              onKeyDown={(e) => handleKeyDown(index, e)}
-              className="w-[44px] h-[44px] bg-black border border-white/20 font-['JetBrains_Mono',monospace] text-[20px] text-white text-center focus:border-[#ff6600] focus:outline-none"
-            />
-          ))}
+        {/* Status indicator */}
+        <div className="flex flex-col items-center gap-4 w-full">
+          {status === "completing" && (
+            <div className="w-8 h-8 border-2 border-[#ff6600] border-t-transparent rounded-full animate-spin" />
+          )}
+          {status === "waiting" && (
+            <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/40 text-center px-4">
+              Open the link in your email to continue. If you don't see it, check your spam folder.
+            </div>
+          )}
+          {error && (
+            <div className="font-['JetBrains_Mono',monospace] text-[9px] text-red-500 text-center">
+              {error}
+            </div>
+          )}
+          {needsEmail && status === "error" && (
+            <div className="flex flex-col gap-3 w-full">
+              <input
+                type="email"
+                value={fallbackEmail}
+                onChange={(e) => setFallbackEmail(e.target.value)}
+                placeholder="Enter your email"
+                className="w-full bg-white/5 border border-white/20 px-4 py-3 font-['JetBrains_Mono',monospace] text-[11px] text-white placeholder:text-white/30 focus:outline-none focus:border-[#ff6600]"
+              />
+              <button
+                onClick={handleFallbackSubmit}
+                disabled={!fallbackEmail}
+                className="w-full bg-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[10px] text-black font-bold uppercase tracking-wider disabled:opacity-40 hover:bg-[#ff6600]/90 transition-colors"
+              >
+                Complete Sign-In
+              </button>
+            </div>
+          )}
+          {resent && (
+            <div className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] text-center">
+              Verification link resent
+            </div>
+          )}
         </div>
 
         {/* Resend */}
         <div className="flex items-center justify-center gap-1 font-['JetBrains_Mono',monospace] text-[9px]">
-          <span className="text-white/40">Didn't receive the code?</span>
-          <button className="text-white/60 underline hover:text-[#ff6600] transition-colors text-[10px]">
+          <span className="text-white/40">Didn't receive the link?</span>
+          <button
+            onClick={handleResend}
+            className="text-white/60 underline hover:text-[#ff6600] transition-colors text-[10px]"
+          >
             Resend
           </button>
         </div>
 
-        {/* Verify Button */}
+        {/* Back button */}
         <button
-          onClick={handleVerify}
-          disabled={!isComplete}
-          className="w-full bg-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[11px] text-black font-bold uppercase tracking-wider hover:bg-[#ff8833] transition-colors disabled:opacity-30 disabled:cursor-not-allowed border-2 border-[#ff6600]"
+          onClick={() => navigate("/onboarding/welcome")}
+          className="w-full border border-white/20 py-3 font-['JetBrains_Mono',monospace] text-[10px] text-white uppercase tracking-wider hover:border-[#ff6600] hover:bg-white/5 transition-colors"
         >
-          Verify →
+          ← Back
         </button>
 
         {/* Terms */}
