@@ -88,6 +88,16 @@ Rules:
 - Give the program a creative military-style name`;
 }
 
+/** Race a promise against a timeout */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
 /**
  * Generate a training program using Gemini (primary) → llm.ts (fallback) → template.
  */
@@ -97,13 +107,18 @@ export async function generateProgram(data: PersonalizationData): Promise<Progra
     const model = createProgramModel(
       "You are a professional fitness program designer for the STRIDE training system. Generate structured training programs in JSON format."
     );
-    const result = await model.generateContent(buildPromptText(data));
+    const result = await withTimeout(
+      model.generateContent(buildPromptText(data)),
+      30000,
+      "Gemini program generation"
+    );
     const text = result.response.text();
     const program = JSON.parse(text) as Program;
 
     if (!program.name || !program.weeks?.length) {
       throw new Error("Invalid program structure from Gemini");
     }
+    console.log("[ProgramGenerator] Generated via Gemini");
     return program;
   } catch (geminiErr) {
     console.warn("[ProgramGenerator] Gemini failed, trying llm.ts fallback:", geminiErr);
@@ -115,17 +130,19 @@ export async function generateProgram(data: PersonalizationData): Promise<Progra
     const program = await chatCompletionJSON<Program>(messages, {
       temperature: 0.6,
       maxTokens: 4096,
-      timeoutMs: 120000,
+      timeoutMs: 60000,
     });
 
     if (!program.name || !program.weeks?.length) {
       throw new Error("Invalid program structure from LLM");
     }
+    console.log("[ProgramGenerator] Generated via LLM fallback");
     return program;
   } catch (llmErr) {
     console.warn("[ProgramGenerator] LLM fallback failed, using template:", llmErr);
   }
 
+  console.log("[ProgramGenerator] Using fallback template");
   return buildFallbackProgram(data);
 }
 
