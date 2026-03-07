@@ -1,9 +1,11 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router";
 import imgRectangle7 from "figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.png";
-import { runTransaction, doc as firestoreDoc } from "firebase/firestore";
-import { db } from "../../../services/firebase";
+import { httpsCallable } from "firebase/functions";
+import { functions } from "../../../services/firebase";
 import { useAuth } from "../../contexts/AuthContext";
+import { logOut } from "../../../services/auth";
+import { getDocumentFresh } from "../../../services/firestore";
 
 export default function BetaCode() {
   const navigate = useNavigate();
@@ -11,7 +13,27 @@ export default function BetaCode() {
   const [code, setCode] = useState(["", "", "", "", "", ""]);
   const [error, setError] = useState("");
   const [verifying, setVerifying] = useState(false);
+  const [verified, setVerified] = useState(false);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  // Skip beta screen if user already validated a code
+  const skipChecked = useRef(false);
+  useEffect(() => {
+    if (!user || verified || skipChecked.current) return;
+    skipChecked.current = true;
+    getDocumentFresh<{ betaValidated?: boolean; onboardingComplete?: boolean }>(`users/${user.uid}`)
+      .then((doc) => {
+        if (doc?.onboardingComplete) {
+          navigate("/app", { replace: true });
+        } else if (doc?.betaValidated) {
+          setVerified(true);
+          navigate("/onboarding/profile", { replace: true });
+        }
+      })
+      .catch((err) => {
+        console.error("Beta check failed:", err);
+      });
+  }, [user?.uid]);
 
   const handleChange = (index: number, value: string) => {
     const clean = value.replace(/[^A-Z0-9]/gi, '').toUpperCase();
@@ -58,28 +80,34 @@ export default function BetaCode() {
   };
 
   const handleVerify = async () => {
+    if (!user) {
+      setError("You must be signed in to verify a beta code");
+      navigate("/onboarding/welcome", { replace: true });
+      return;
+    }
+
     const fullCode = code.join("");
     if (fullCode.length !== 6) return;
 
     setError("");
     setVerifying(true);
     try {
-      const codeRef = firestoreDoc(db, "betaCodes", fullCode.toUpperCase());
-      await runTransaction(db, async (transaction) => {
-        const snap = await transaction.get(codeRef);
-        if (!snap.exists() || snap.data()?.used) {
-          throw new Error("Invalid or expired beta code");
-        }
-        transaction.update(codeRef, {
-          used: true,
-          usedBy: user?.uid || null,
-          usedAt: new Date().toISOString(),
-        });
-      });
-      navigate("/onboarding/profile");
+      const validateBetaCode = httpsCallable(functions, "validateBetaCode");
+      await validateBetaCode({ code: fullCode.toUpperCase() });
+      // Force a server read to refresh the local Firestore cache with the
+      // server-set betaValidated flag (set by the Cloud Function above)
+      await getDocumentFresh(`users/${user.uid}`);
+      setVerified(true);
+      navigate("/onboarding/profile", { replace: true });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "";
-      setError(msg === "Invalid or expired beta code" ? msg : "Failed to verify code. Try again.");
+      const firebaseErr = err as { code?: string; message?: string };
+      // Cloud Function HttpsError messages come through as-is
+      const msg = firebaseErr.message || "";
+      if (msg.includes("Invalid or expired beta code")) {
+        setError("Invalid or expired beta code");
+      } else {
+        setError("Failed to verify code. Try again.");
+      }
       setVerifying(false);
     }
   };
@@ -98,9 +126,9 @@ export default function BetaCode() {
         {/* Header */}
         <div className="flex flex-col items-center gap-4 w-full">
           <div className="h-[24px] w-[35px] overflow-hidden relative">
-            <img 
-              src={imgRectangle7} 
-              alt="Logo" 
+            <img
+              src={imgRectangle7}
+              alt="Logo"
               className="w-full h-full object-contain"
             />
           </div>
@@ -118,7 +146,11 @@ export default function BetaCode() {
             <input
               key={index}
               ref={(el) => (inputRefs.current[index] = el)}
+              id={`beta-code-${index}`}
+              name={`beta-code-${index}`}
               type="text"
+              inputMode="text"
+              autoComplete="off"
               maxLength={1}
               value={char}
               onChange={(e) => handleChange(index, e.target.value)}
@@ -143,6 +175,17 @@ export default function BetaCode() {
           className="w-full bg-[#ff6600] py-3 font-['JetBrains_Mono',monospace] text-[11px] text-black font-bold uppercase tracking-wider hover:bg-[#ff8833] transition-colors disabled:opacity-30 disabled:cursor-not-allowed border-2 border-[#ff6600]"
         >
           {verifying ? "Verifying..." : "Verify →"}
+        </button>
+
+        {/* Back to sign-in */}
+        <button
+          onClick={async () => {
+            await logOut();
+            navigate("/onboarding/welcome", { replace: true });
+          }}
+          className="font-['JetBrains_Mono',monospace] text-[10px] text-white/40 uppercase tracking-wider hover:text-white/60 transition-colors"
+        >
+          ← Back to sign in
         </button>
 
         {/* Terms */}

@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useNavigate } from "react-router";
 import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.png";
 import { useAuth } from "../../contexts/AuthContext";
-import { getDocument } from "../../../services/firestore";
+import { routeAfterAuth } from "../../utils/routeAfterAuth";
 
 export default function Splashscreen() {
   const navigate = useNavigate();
@@ -11,17 +11,7 @@ export default function Splashscreen() {
   // If user is already authenticated, route them to the right place
   useEffect(() => {
     if (loading || !user) return;
-    getDocument<{ onboardingComplete?: boolean }>(`users/${user.uid}`)
-      .then((doc) => {
-        if (doc?.onboardingComplete) {
-          navigate("/app", { replace: true });
-        } else {
-          navigate("/onboarding/beta", { replace: true });
-        }
-      })
-      .catch(() => {
-        // Firestore read failed, let them proceed normally
-      });
+    routeAfterAuth(user.uid, navigate);
   }, [user, loading]);
 
   return (

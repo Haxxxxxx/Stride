@@ -262,25 +262,6 @@ export function recordWorkoutCompleted(): BehaviorState {
   });
 }
 
-export function recordWorkoutSkipped(): BehaviorState {
-  const state = getBehaviorState();
-  return updateBehaviorState({
-    workoutsSkippedThisWeek: state.workoutsSkippedThisWeek + 1,
-    workoutsSkipped14d: state.workoutsSkipped14d + 1,
-    lastWorkoutSkippedAt: Date.now(),
-    consecutiveMissedSessions: state.consecutiveMissedSessions + 1,
-  });
-}
-
-export function recordStreakBroken(): BehaviorState {
-  const state = getBehaviorState();
-  return updateBehaviorState({
-    previousStreakDays: state.streakDays,
-    streakDays: 0,
-    streakBreaks: state.streakBreaks + 1,
-  });
-}
-
 export function recordDelayLanguage(): BehaviorState {
   const state = getBehaviorState();
   return updateBehaviorState({

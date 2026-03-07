@@ -1,8 +1,7 @@
 // STRIDE Program Generator
 // Uses Gemini via Firebase AI Logic for personalized training programs
-// Falls back to llm.ts providers, then to a basic template if all fail
+// Falls back to a basic template if Gemini fails
 
-import { chatCompletionJSON, type LLMMessage } from "./llm";
 import { createProgramModel } from "./gemini";
 
 // ============================================================
@@ -40,10 +39,13 @@ export interface PersonalizationData {
   constraints?: string[];
   sessionTime?: string;
   trainingFocuses?: string[];
-  equipmentAccess?: string;
+  equipmentAccess?: string[] | string;
   gymAccess?: string;
   bodyProfile?: string;
-  sportFocus?: string;
+  sportFocus?: string[] | string;
+  height?: { value: string; unit: string };
+  weight?: { value: string; unit: string };
+  goalWeight?: { value: string; unit: string };
 }
 
 // ============================================================
@@ -64,28 +66,65 @@ function getDaysPerWeek(data: PersonalizationData): number {
   }
 }
 
+function formatList(val: string[] | string | undefined, fallback: string): string {
+  if (!val) return fallback;
+  return Array.isArray(val) ? (val.length ? val.join(", ") : fallback) : val;
+}
+
+function formatSessionTime(val?: string): string {
+  if (!val) return "30-45 min";
+  // Values are "10-20", "20-40", "40+"
+  return `${val} min`;
+}
+
 function buildPromptText(data: PersonalizationData): string {
   const durationWeeks = 4;
   const daysPerWeek = getDaysPerWeek(data);
 
-  return `Generate a ${durationWeeks}-week training program for an operator with:
-- Goal: ${data.optimizationGoal || "general conditioning"}
-- Experience: ${data.experience || "intermediate"}
-- Equipment: ${data.equipmentAccess || "full gym"}${data.gymAccess ? ` (${data.gymAccess})` : ""}
-- Session time: ${data.sessionTime || "30-45 min"}
-- Training focuses: ${data.trainingFocuses?.join(", ") || "balanced"}
-- Constraints: ${data.constraints?.length ? data.constraints.join(", ") : "none"}
-${data.sportFocus ? `- Sport focus: ${data.sportFocus}` : ""}
-- Training days per week: ${daysPerWeek}
+  const lines: string[] = [
+    `Generate a ${durationWeeks}-week training program for an operator with:`,
+    `- Body profile: ${data.bodyProfile || "unspecified"}`,
+    `- Goal: ${data.optimizationGoal || "general conditioning"}`,
+    `- Experience level: ${data.experience || "intermediate"}`,
+  ];
 
-Rules:
-- Each day should have 4-7 exercises appropriate for the goal
-- Progressive overload: slightly increase volume or intensity each week
-- Include warm-up and cool-down exercises
-- Match exercises to available equipment
-- Keep session within the time constraint
-- Use concise, professional exercise names
-- Give the program a creative military-style name`;
+  if (data.height?.value) {
+    lines.push(`- Height: ${data.height.value} ${data.height.unit}`);
+  }
+  if (data.weight?.value) {
+    lines.push(`- Weight: ${data.weight.value} ${data.weight.unit}`);
+  }
+  if (data.goalWeight?.value) {
+    lines.push(`- Goal weight: ${data.goalWeight.value} ${data.goalWeight.unit}`);
+  }
+
+  lines.push(
+    `- Available equipment: ${formatList(data.equipmentAccess, "full gym")}${data.gymAccess ? ` (${data.gymAccess} gym)` : ""}`,
+    `- Session time: ${formatSessionTime(data.sessionTime)}`,
+    `- Training focuses: ${formatList(data.trainingFocuses, "balanced")}`,
+    `- Constraints/limitations: ${data.constraints?.length ? data.constraints.join(", ") : "none"}`,
+  );
+
+  const sport = formatList(data.sportFocus, "");
+  if (sport) {
+    lines.push(`- Sport focus: ${sport}`);
+  }
+
+  lines.push(
+    `- Training days per week: ${daysPerWeek}`,
+    ``,
+    `Rules:`,
+    `- Each day should have 4-7 exercises appropriate for the goal and body profile`,
+    `- Progressive overload: slightly increase volume or intensity each week`,
+    `- Include warm-up movements at the start of each session`,
+    `- Match exercises to available equipment only — do not prescribe equipment the operator doesn't have`,
+    `- Keep each session within the ${formatSessionTime(data.sessionTime)} time constraint`,
+    `- If the operator has constraints (injury, time, energy), adjust exercise selection and intensity accordingly`,
+    `- Use concise, professional exercise names`,
+    `- Give the program a creative military-style name`,
+  );
+
+  return lines.join("\n");
 }
 
 /** Race a promise against a timeout */
@@ -99,17 +138,16 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 /**
- * Generate a training program using Gemini (primary) → llm.ts (fallback) → template.
+ * Generate a training program using Gemini (primary) → template fallback.
  */
 export async function generateProgram(data: PersonalizationData): Promise<Program> {
-  // Try Gemini first — native JSON schema output, no parse retries needed
   try {
     const model = createProgramModel(
       "You are a professional fitness program designer for the STRIDE training system. Generate structured training programs in JSON format."
     );
     const result = await withTimeout(
       model.generateContent(buildPromptText(data)),
-      30000,
+      45000,
       "Gemini program generation"
     );
     const text = result.response.text();
@@ -118,31 +156,11 @@ export async function generateProgram(data: PersonalizationData): Promise<Progra
     if (!program.name || !program.weeks?.length) {
       throw new Error("Invalid program structure from Gemini");
     }
-    console.log("[ProgramGenerator] Generated via Gemini");
     return program;
-  } catch (geminiErr) {
-    console.warn("[ProgramGenerator] Gemini failed, trying llm.ts fallback:", geminiErr);
+  } catch (err) {
+    console.warn("[ProgramGenerator] Gemini failed, using template fallback:", err);
   }
 
-  // Fallback to llm.ts providers
-  try {
-    const messages = buildLLMPrompt(data);
-    const program = await chatCompletionJSON<Program>(messages, {
-      temperature: 0.6,
-      maxTokens: 4096,
-      timeoutMs: 60000,
-    });
-
-    if (!program.name || !program.weeks?.length) {
-      throw new Error("Invalid program structure from LLM");
-    }
-    console.log("[ProgramGenerator] Generated via LLM fallback");
-    return program;
-  } catch (llmErr) {
-    console.warn("[ProgramGenerator] LLM fallback failed, using template:", llmErr);
-  }
-
-  console.log("[ProgramGenerator] Using fallback template");
   return buildFallbackProgram(data);
 }
 
@@ -190,75 +208,13 @@ Each day should have 4-7 exercises with progressive overload appropriate for wee
 }
 
 // ============================================================
-// LLM Fallback Prompt (for llm.ts providers)
-// ============================================================
-
-function buildLLMPrompt(data: PersonalizationData): LLMMessage[] {
-  const systemMessage: LLMMessage = {
-    role: "system",
-    content: `You are a professional fitness program designer for the STRIDE training system. You output ONLY valid JSON. No markdown, no explanation, no code blocks — just the raw JSON object.`,
-  };
-
-  const durationWeeks = 4;
-  const daysPerWeek = getDaysPerWeek(data);
-
-  const userMessage: LLMMessage = {
-    role: "user",
-    content: `Generate a ${durationWeeks}-week training program for an operator with:
-- Goal: ${data.optimizationGoal || "general conditioning"}
-- Experience: ${data.experience || "intermediate"}
-- Equipment: ${data.equipmentAccess || "full gym"}${data.gymAccess ? ` (${data.gymAccess})` : ""}
-- Session time: ${data.sessionTime || "30-45 min"}
-- Training focuses: ${data.trainingFocuses?.join(", ") || "balanced"}
-- Constraints: ${data.constraints?.length ? data.constraints.join(", ") : "none"}
-${data.sportFocus ? `- Sport focus: ${data.sportFocus}` : ""}
-- Training days per week: ${daysPerWeek}
-
-Output this exact JSON structure:
-{
-  "name": "string - creative military-style program name",
-  "durationWeeks": ${durationWeeks},
-  "weeks": [
-    {
-      "weekNumber": 1,
-      "days": [
-        {
-          "dayNumber": 1,
-          "name": "string - workout name like 'Upper Power' or 'Conditioning Alpha'",
-          "exercises": [
-            {
-              "name": "string - exercise name",
-              "sets": 3,
-              "reps": "string - like '12' or '30s' or '8-10'",
-              "rest": "string - like '60s' or '90s'",
-              "notes": "optional string"
-            }
-          ]
-        }
-      ]
-    }
-  ]
-}
-
-Rules:
-- Each day should have 4-7 exercises appropriate for the goal
-- Progressive overload: slightly increase volume or intensity each week
-- Include warm-up and cool-down exercises
-- Match exercises to available equipment
-- Keep session within the time constraint
-- Use concise, professional exercise names`,
-  };
-
-  return [systemMessage, userMessage];
-}
-
-// ============================================================
 // Fallback Template Program
 // ============================================================
 
 function buildFallbackProgram(data: PersonalizationData): Program {
   const daysPerWeek = getDaysPerWeek(data);
-  const hasGym = data.equipmentAccess !== "none" && data.equipmentAccess !== "bodyweight";
+  const equipment = Array.isArray(data.equipmentAccess) ? data.equipmentAccess : [data.equipmentAccess];
+  const hasGym = equipment.some((e) => e && e !== "bodyweight");
 
   const bodyweightExercises: Exercise[][] = [
     [

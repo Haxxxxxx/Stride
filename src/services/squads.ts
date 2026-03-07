@@ -1,13 +1,12 @@
 import {
   getDocument,
-  setDocument,
-  updateDocument,
-  deleteDocument,
+  batchWrite,
   queryCollection,
   where,
   orderBy,
   serverTimestamp,
   increment,
+  arrayUnion,
 } from "./firestore";
 
 // ── Types ──────────────────────────────────────────────
@@ -35,9 +34,10 @@ export interface SquadMember {
 
 function generateSquadCode(): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
   let code = "SQD-";
   for (let i = 0; i < 6; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)];
+    code += chars[bytes[i] % chars.length];
   }
   return code;
 }
@@ -55,29 +55,38 @@ export async function createSquad(
   const id = crypto.randomUUID().split("-")[0];
   const code = generateSquadCode();
 
-  await setDocument(`squads/${id}`, {
-    name,
-    type,
-    code,
-    createdBy: uid,
-    createdAt: serverTimestamp(),
-    memberCount: 1,
-  });
-
-  // Add creator as leader
-  await setDocument(`squads/${id}/members/${uid}`, {
-    joinedAt: serverTimestamp(),
-    role: "leader",
-    shareProgress,
-    callsign: callsign ?? "",
-    avatarUrl: avatarUrl ?? "",
-  });
+  await batchWrite([
+    {
+      type: "set",
+      path: `squads/${id}`,
+      data: {
+        name,
+        type,
+        code,
+        createdBy: uid,
+        createdAt: serverTimestamp(),
+        memberCount: 1,
+      },
+    },
+    {
+      type: "set",
+      path: `squads/${id}/members/${uid}`,
+      data: {
+        joinedAt: serverTimestamp(),
+        role: "leader",
+        shareProgress,
+        callsign: callsign ?? "",
+        avatarUrl: avatarUrl ?? "",
+      },
+    },
+    {
+      type: "update",
+      path: `users/${uid}`,
+      data: { squadIds: arrayUnion(id) },
+    },
+  ]);
 
   return { squadId: id, code };
-}
-
-export async function getSquad(squadId: string): Promise<Squad | null> {
-  return getDocument<Squad>(`squads/${squadId}`);
 }
 
 export async function getSquadByCode(code: string): Promise<Squad | null> {
@@ -86,18 +95,20 @@ export async function getSquadByCode(code: string): Promise<Squad | null> {
 }
 
 export async function getUserSquads(uid: string): Promise<Squad[]> {
-  // Firestore doesn't support collection group queries on subcollections easily
-  // so we query all squads and filter client-side, or store squad IDs on the user doc
-  // For now, query all squads and check membership
-  const allSquads = await queryCollection<Squad>("squads", [orderBy("createdAt", "desc")]);
-  const userSquads: Squad[] = [];
+  // Read squad IDs from user doc, then batch-fetch only those squads
+  const userDoc = await getDocument<{ squadIds?: string[] }>(`users/${uid}`);
+  const squadIds = userDoc?.squadIds ?? [];
+  if (squadIds.length === 0) return [];
 
-  for (const squad of allSquads) {
-    const member = await getDocument(`squads/${squad.id}/members/${uid}`);
-    if (member) userSquads.push(squad);
+  // Firestore 'in' queries support up to 30 values
+  const squads: Squad[] = [];
+  for (let i = 0; i < squadIds.length; i += 30) {
+    const batch = squadIds.slice(i, i + 30);
+    const results = await queryCollection<Squad>("squads", [where("__name__", "in", batch)]);
+    squads.push(...results);
   }
 
-  return userSquads;
+  return squads;
 }
 
 // ── Member operations ──────────────────────────────────
@@ -109,27 +120,29 @@ export async function joinSquad(
   callsign?: string,
   avatarUrl?: string
 ): Promise<void> {
-  await setDocument(`squads/${squadId}/members/${uid}`, {
-    joinedAt: serverTimestamp(),
-    role: "member",
-    shareProgress,
-    callsign: callsign ?? "",
-    avatarUrl: avatarUrl ?? "",
-  });
-
-  // Atomically increment member count
-  await updateDocument(`squads/${squadId}`, {
-    memberCount: increment(1),
-  });
-}
-
-export async function leaveSquad(squadId: string, uid: string): Promise<void> {
-  await deleteDocument(`squads/${squadId}/members/${uid}`);
-
-  // Atomically decrement member count
-  await updateDocument(`squads/${squadId}`, {
-    memberCount: increment(-1),
-  });
+  await batchWrite([
+    {
+      type: "set",
+      path: `squads/${squadId}/members/${uid}`,
+      data: {
+        joinedAt: serverTimestamp(),
+        role: "member",
+        shareProgress,
+        callsign: callsign ?? "",
+        avatarUrl: avatarUrl ?? "",
+      },
+    },
+    {
+      type: "update",
+      path: `squads/${squadId}`,
+      data: { memberCount: increment(1) },
+    },
+    {
+      type: "update",
+      path: `users/${uid}`,
+      data: { squadIds: arrayUnion(squadId) },
+    },
+  ]);
 }
 
 export async function getSquadMembers(squadId: string): Promise<SquadMember[]> {

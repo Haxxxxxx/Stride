@@ -3,7 +3,7 @@ import { useNavigate } from "react-router";
 import svgPaths from "../../../imports/svg-v0sj4hk01y";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { useAuth } from "../../contexts/AuthContext";
-import { setDocument } from "../../../services/firestore";
+import { setDocument, batchWrite } from "../../../services/firestore";
 import { generateProgram, type PersonalizationData } from "../../../services/programGenerator";
 import { notifyProgramGenerated } from "../../../services/notifications";
 
@@ -34,9 +34,9 @@ export default function ProgramForging() {
 
     const run = async () => {
       try {
-        // Stage 1: Save personalization (0-30%)
+        // Stage 1: Save personalization (0→25%, quick)
         setStage("saving");
-        animateProgress(0, 30, 800);
+        startAsymptotic(0, 25);
 
         const personalization: PersonalizationData = {
           bodyProfile: store.bodyProfile,
@@ -48,6 +48,9 @@ export default function ProgramForging() {
           sportFocus: store.sportFocus,
           equipmentAccess: store.equipmentAccess,
           gymAccess: store.gymAccess,
+          height: store.height,
+          weight: store.weight,
+          goalWeight: store.optimizationGoal === "fat-loss" ? store.goalWeight : undefined,
         };
 
         await setDocument(`users/${user.uid}/personalization/data`, {
@@ -58,41 +61,40 @@ export default function ProgramForging() {
           selectedAgent: store.selectedAgent,
         });
 
-        await setDocument(`users/${user.uid}`, {
-          onboardingComplete: true,
-        });
-
-        // Stage 2: Generate program via LLM (30-80%)
+        // Stage 2: Generate program via LLM (25→92%, slow — this is the long one)
         setStage("generating");
-        animateProgress(30, 75, 2000);
+        startAsymptotic(25, 92);
 
         const program = await generateProgram(personalization);
 
-        // Stage 3: Store program in Firestore (80-100%)
+        // Stage 3: Store program in Firestore (92→99%)
         setStage("storing");
-        animateProgress(75, 95, 500);
+        startAsymptotic(92, 99);
 
         const programId = `program_${Date.now()}`;
-        await setDocument(`users/${user.uid}/programs/${programId}`, {
-          ...program,
-          active: true,
-          createdAt: new Date().toISOString(),
-        });
+        // Atomic batch: store program + mark onboarding complete together
+        // If either fails, neither is committed — prevents orphaned state
+        await batchWrite([
+          {
+            type: "set",
+            path: `users/${user.uid}/programs/${programId}`,
+            data: { ...program, active: true, createdAt: new Date().toISOString() },
+          },
+          {
+            type: "update",
+            path: `users/${user.uid}`,
+            data: { onboardingComplete: true },
+          },
+        ]);
         notifyProgramGenerated(user.uid, program.name).catch(console.warn);
 
-        // Done — kill any running animation and snap to 100%
-        if (activeInterval.current) {
-          clearInterval(activeInterval.current);
-          activeInterval.current = null;
-        }
+        // Done — kill animation and snap to 100%
+        stopAnimation();
         store.reset();
         setStage("done");
         setProgress(100);
       } catch (err) {
-        if (activeInterval.current) {
-          clearInterval(activeInterval.current);
-          activeInterval.current = null;
-        }
+        stopAnimation();
         console.error("Program forging failed:", err);
         setStage("error");
         setError(err instanceof Error ? err.message : "Unknown error");
@@ -102,33 +104,33 @@ export default function ProgramForging() {
     run();
   }, [user]);
 
-  // Smooth progress animation helper — clears any previous interval first
-  const animateProgress = (from: number, to: number, durationMs: number) => {
-    if (activeInterval.current) clearInterval(activeInterval.current);
+  const stopAnimation = () => {
+    if (activeInterval.current) {
+      clearInterval(activeInterval.current);
+      activeInterval.current = null;
+    }
+  };
 
-    setProgress(from);
-    const steps = Math.ceil(durationMs / 50);
-    const increment = (to - from) / steps;
-    let step = 0;
+  /**
+   * Asymptotic progress: starts at `from`, creeps toward `ceiling` forever
+   * but never reaches it. Each tick closes ~1.5% of the remaining gap,
+   * so the bar always moves but slows down as it approaches the ceiling.
+   * Will hover around 98-99% if the task takes 60s+.
+   */
+  const startAsymptotic = (from: number, ceiling: number) => {
+    stopAnimation();
+    let current = from;
+    setProgress(current);
 
     activeInterval.current = setInterval(() => {
-      step++;
-      const value = Math.min(from + increment * step, to);
-      setProgress(value);
-      if (step >= steps) {
-        clearInterval(activeInterval.current!);
-        activeInterval.current = null;
-      }
-    }, 50);
+      const remaining = ceiling - current;
+      // Close 1.5% of the remaining gap each tick (every 100ms)
+      current += remaining * 0.015;
+      setProgress(current);
+    }, 100);
   };
 
   const handleRetry = () => {
-    startedRef.current = false;
-    setProgress(0);
-    setStage("saving");
-    setError(null);
-    // Re-trigger by forcing re-render (the effect checks startedRef)
-    startedRef.current = false;
     window.location.reload();
   };
 

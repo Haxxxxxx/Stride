@@ -1,8 +1,6 @@
 import {
   getDocument,
-  setDocument,
-  updateDocument,
-  deleteDocument,
+  batchWrite,
   queryCollection,
   where,
   orderBy,
@@ -35,10 +33,6 @@ export interface ChallengeParticipant {
 
 // ── Challenge CRUD ─────────────────────────────────────
 
-export async function getChallenges(): Promise<Challenge[]> {
-  return queryCollection<Challenge>("challenges", [orderBy("createdAt", "desc")]);
-}
-
 export async function getActiveChallenges(): Promise<Challenge[]> {
   const now = new Date().toISOString().split("T")[0];
   return queryCollection<Challenge>("challenges", [
@@ -51,18 +45,6 @@ export async function getChallenge(challengeId: string): Promise<Challenge | nul
   return getDocument<Challenge>(`challenges/${challengeId}`);
 }
 
-export async function createChallenge(
-  data: Omit<Challenge, "id" | "createdAt" | "participantCount">
-): Promise<string> {
-  const id = crypto.randomUUID().split("-")[0];
-  await setDocument(`challenges/${id}`, {
-    ...data,
-    participantCount: 0,
-    createdAt: serverTimestamp(),
-  });
-  return id;
-}
-
 // ── Participant operations ─────────────────────────────
 
 export async function joinChallenge(
@@ -71,27 +53,23 @@ export async function joinChallenge(
   shareProgress: boolean,
   callsign?: string
 ): Promise<void> {
-  // Add participant
-  await setDocument(`challenges/${challengeId}/participants/${uid}`, {
-    joinedAt: serverTimestamp(),
-    progress: 0,
-    shareProgress,
-    callsign: callsign ?? "",
-  });
-
-  // Atomically increment participant count
-  await updateDocument(`challenges/${challengeId}`, {
-    participantCount: increment(1),
-  });
-}
-
-export async function leaveChallenge(challengeId: string, uid: string): Promise<void> {
-  await deleteDocument(`challenges/${challengeId}/participants/${uid}`);
-
-  // Atomically decrement participant count
-  await updateDocument(`challenges/${challengeId}`, {
-    participantCount: increment(-1),
-  });
+  await batchWrite([
+    {
+      type: "set",
+      path: `challenges/${challengeId}/participants/${uid}`,
+      data: {
+        joinedAt: serverTimestamp(),
+        progress: 0,
+        shareProgress,
+        callsign: callsign ?? "",
+      },
+    },
+    {
+      type: "update",
+      path: `challenges/${challengeId}`,
+      data: { participantCount: increment(1) },
+    },
+  ]);
 }
 
 export async function getChallengeParticipants(
@@ -101,14 +79,6 @@ export async function getChallengeParticipants(
     `challenges/${challengeId}/participants`,
     [orderBy("progress", "desc")]
   );
-}
-
-export async function updateParticipantProgress(
-  challengeId: string,
-  uid: string,
-  progress: number
-): Promise<void> {
-  await updateDocument(`challenges/${challengeId}/participants/${uid}`, { progress });
 }
 
 export async function isParticipant(challengeId: string, uid: string): Promise<boolean> {
@@ -125,7 +95,3 @@ export function daysRemaining(endDate: string): number {
   return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
 }
 
-export function isChallengeActive(challenge: Challenge): boolean {
-  const now = new Date().toISOString().split("T")[0];
-  return challenge.startDate <= now && challenge.endDate >= now;
-}

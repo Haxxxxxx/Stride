@@ -1,38 +1,28 @@
 import {
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  sendSignInLinkToEmail,
   isSignInWithEmailLink,
   signInWithEmailLink,
+  sendSignInLinkToEmail,
   signInWithPopup,
   signInWithRedirect,
-  getRedirectResult,
-  signInAnonymously,
   signInWithCustomToken,
+  getRedirectResult,
   GoogleAuthProvider,
   signOut,
   onAuthStateChanged,
   type User,
 } from "firebase/auth";
-import { auth } from "./firebase";
+import { httpsCallable } from "firebase/functions";
+import { auth, functions } from "./firebase";
 
 const googleProvider = new GoogleAuthProvider();
 
-export async function signUpWithEmail(email: string, password: string) {
-  return createUserWithEmailAndPassword(auth, email, password);
-}
-
-export async function signInWithEmail(email: string, password: string) {
-  return signInWithEmailAndPassword(auth, email, password);
-}
-
-// Passwordless email link auth
+// Passwordless email link auth via Firebase built-in sender
 export async function sendEmailSignInLink(email: string) {
-  const actionCodeSettings = {
-    url: window.location.origin + "/onboarding/verify",
+  const continueUrl = `${window.location.origin}/onboarding/verify`;
+  await sendSignInLinkToEmail(auth, email, {
+    url: continueUrl,
     handleCodeInApp: true,
-  };
-  await sendSignInLinkToEmail(auth, email, actionCodeSettings);
+  });
   window.localStorage.setItem("emailForSignIn", email);
 }
 
@@ -68,15 +58,32 @@ export async function checkRedirectResult() {
   return getRedirectResult(auth);
 }
 
-// Wallet auth — sign in anonymously then link wallet address to profile
-export async function signInWithWallet(publicKey: string) {
-  // Use anonymous auth as the Firebase identity, store wallet pubkey on profile
-  const result = await signInAnonymously(auth);
-  return { user: result.user, walletAddress: publicKey };
-}
+/**
+ * Wallet auth — persistent identity linked to Solana wallet address.
+ * 1. Signs a message with the wallet to prove ownership
+ * 2. Calls walletSignIn Cloud Function which verifies signature + returns custom token
+ * 3. Signs in with the custom token for a stable Firebase uid
+ */
+export async function signInWithWallet(
+  publicKey: string,
+  signMessage: (message: Uint8Array) => Promise<Uint8Array>
+) {
+  const message = `Sign in to STRIDE with wallet ${publicKey} at ${Date.now()}`;
+  const messageBytes = new TextEncoder().encode(message);
+  const signatureBytes = await signMessage(messageBytes);
 
-export async function signInAsGuest() {
-  return signInAnonymously(auth);
+  const walletSignInFn = httpsCallable<
+    { walletAddress: string; signature: number[]; message: string },
+    { token: string }
+  >(functions, "walletSignIn");
+
+  const result = await walletSignInFn({
+    walletAddress: publicKey,
+    signature: Array.from(signatureBytes),
+    message,
+  });
+
+  return signInWithCustomToken(auth, result.data.token);
 }
 
 export async function logOut() {

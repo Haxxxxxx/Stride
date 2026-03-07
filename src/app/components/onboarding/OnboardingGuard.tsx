@@ -1,21 +1,51 @@
 import { useState, useEffect } from "react";
-import { Navigate, Outlet } from "react-router";
+import { Navigate, Outlet, useLocation } from "react-router";
 import { useAuth } from "../../contexts/AuthContext";
+import { getDocumentFresh } from "../../../services/firestore";
 
 /**
- * Guards onboarding routes that require authentication (beta code, profile, personalization).
- * If user isn't authenticated, redirects back to Welcome.
+ * Guards onboarding routes that require authentication.
+ * Also enforces beta gate — routes beyond /onboarding/beta require betaValidated.
  */
 export default function OnboardingGuard() {
   const { user, loading } = useAuth();
+  const location = useLocation();
   const [timedOut, setTimedOut] = useState(false);
+  const [betaValidated, setBetaValidated] = useState(false);
+  // Track which pathname was last successfully checked
+  const [checkedPath, setCheckedPath] = useState<string | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setTimedOut(true), 15000);
     return () => clearTimeout(t);
   }, []);
 
-  if (loading) {
+  const isBetaRoute = location.pathname === "/onboarding/beta";
+
+  useEffect(() => {
+    if (!user) return;
+    if (isBetaRoute) {
+      setCheckedPath(location.pathname);
+      return;
+    }
+
+    let cancelled = false;
+    getDocumentFresh<{ betaValidated?: boolean }>(`users/${user.uid}`)
+      .then((doc) => {
+        if (cancelled) return;
+        setBetaValidated(doc?.betaValidated === true);
+        setCheckedPath(location.pathname);
+      })
+      .catch(() => {
+        if (!cancelled) setCheckedPath(location.pathname);
+      });
+    return () => { cancelled = true; };
+  }, [user?.uid, location.pathname]);
+
+  // True only when we've completed a check for this exact path
+  const betaChecked = checkedPath === location.pathname;
+
+  if (loading || (user && !isBetaRoute && !betaChecked)) {
     return (
       <div className="bg-black w-full h-full flex items-center justify-center">
         {timedOut ? (
@@ -39,6 +69,10 @@ export default function OnboardingGuard() {
 
   if (!user) {
     return <Navigate to="/onboarding/welcome" replace />;
+  }
+
+  if (!isBetaRoute && !betaValidated) {
+    return <Navigate to="/onboarding/beta" replace />;
   }
 
   return <Outlet />;

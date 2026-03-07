@@ -3,6 +3,8 @@ import { createBrowserRouter } from "react-router";
 import Root from "./components/Root";
 import ProtectedRoute from "./components/ProtectedRoute";
 import LoadingSkeleton from "./components/LoadingSkeleton";
+import RedirectHandler from "./components/RedirectHandler";
+import LandingGate from "./components/LandingGate";
 import OnboardingLayout from "./components/onboarding/OnboardingLayout";
 import OnboardingGuard from "./components/onboarding/OnboardingGuard";
 import Splashscreen from "./components/onboarding/Splashscreen";
@@ -43,52 +45,65 @@ function withSuspense(LazyComponent: React.LazyExoticComponent<React.ComponentTy
 
 export const router = createBrowserRouter([
   {
-    path: "/",
-    Component: OnboardingLayout,
+    // Root layout — handles Google redirect routing + auth error display
+    Component: RedirectHandler,
     children: [
-      // Public routes — no auth required
-      { index: true, Component: Splashscreen },
-      { path: "onboarding/welcome", Component: Welcome },
-      { path: "onboarding/verify", Component: Verify },
-
-      // Auth-gated onboarding routes — must be signed in
+      // Landing page with auth-aware gate for returning users
       {
-        Component: OnboardingGuard,
+        path: "/",
+        Component: LandingGate,
+      },
+      // Onboarding flow
+      {
+        path: "/onboarding",
+        Component: OnboardingLayout,
         children: [
-          { path: "onboarding/beta", Component: BetaCode },
-          { path: "onboarding/profile", Component: CreateProfile },
-          { path: "onboarding/personalize/1", Component: Step1BodyProfile },
-          { path: "onboarding/personalize/2", Component: Step2Optimization },
-          { path: "onboarding/personalize/3", Component: Step3Height },
-          { path: "onboarding/personalize/4", Component: Step4Weight },
-          { path: "onboarding/personalize/5", Component: Step5GoalWeight },
-          { path: "onboarding/personalize/6", Component: Step6Constraints },
-          { path: "onboarding/personalize/7", Component: Step7SessionTime },
-          { path: "onboarding/personalize/8", Component: Step8Experience },
-          { path: "onboarding/personalize/9", Component: Step9TrainingFocuses },
-          { path: "onboarding/personalize/sport", Component: SportSelection },
-          { path: "onboarding/personalize/equipment", Component: EquipmentAccess },
-          { path: "onboarding/personalize/gym", Component: Step10GymAccess },
-          { path: "onboarding/personalize/agent", Component: AgentSelection },
-          { path: "onboarding/personalize/forging", Component: ProgramForging },
+          // Public routes — no auth required
+          { index: true, Component: Splashscreen },
+          { path: "welcome", Component: Welcome },
+          { path: "verify", Component: Verify },
+
+          // Auth-gated onboarding routes — must be signed in
+          {
+            Component: OnboardingGuard,
+            children: [
+              { path: "beta", Component: BetaCode },
+              { path: "profile", Component: CreateProfile },
+              { path: "personalize/1", Component: Step1BodyProfile },
+              { path: "personalize/2", Component: Step2Optimization },
+              { path: "personalize/3", Component: Step3Height },
+              { path: "personalize/4", Component: Step4Weight },
+              { path: "personalize/5", Component: Step5GoalWeight },
+              { path: "personalize/6", Component: Step6Constraints },
+              { path: "personalize/7", Component: Step7SessionTime },
+              { path: "personalize/8", Component: Step8Experience },
+              { path: "personalize/9", Component: Step9TrainingFocuses },
+              { path: "personalize/sport", Component: SportSelection },
+              { path: "personalize/equipment", Component: EquipmentAccess },
+              { path: "personalize/gym", Component: Step10GymAccess },
+              { path: "personalize/agent", Component: AgentSelection },
+              { path: "personalize/forging", Component: ProgramForging },
+            ],
+          },
         ],
       },
-    ],
-  },
-  {
-    path: "/app",
-    Component: ProtectedRoute,
-    children: [
+      // Main app (authenticated + onboarding complete)
       {
-        Component: Root,
+        path: "/app",
+        Component: ProtectedRoute,
         children: [
-          { index: true, Component: withSuspense(Dashboard) },
-          { path: "progress", Component: withSuspense(Progress) },
-          { path: "challenges", Component: withSuspense(Challenges) },
-          { path: "challenges/:id", Component: withSuspense(ChallengeDetail) },
-          { path: "profile", Component: withSuspense(Profile) },
-          { path: "ai-agent", Component: withSuspense(AIAgent) },
-          { path: "notifications", Component: withSuspense(Notifications) },
+          {
+            Component: Root,
+            children: [
+              { index: true, Component: withSuspense(Dashboard) },
+              { path: "progress", Component: withSuspense(Progress) },
+              { path: "challenges", Component: withSuspense(Challenges) },
+              { path: "challenges/:id", Component: withSuspense(ChallengeDetail) },
+              { path: "profile", Component: withSuspense(Profile) },
+              { path: "ai-agent", Component: withSuspense(AIAgent) },
+              { path: "notifications", Component: withSuspense(Notifications) },
+            ],
+          },
         ],
       },
     ],

@@ -4,12 +4,11 @@ import svgPaths from "../../imports/svg-oe8cws8da9";
 import { getAgentResponse, containsDelayLanguage, containsResetLanguage } from "../utils/agentLayer";
 import { shouldDeliverFriction } from "../utils/frictionEngine";
 import { recordAgentInteraction, recordDelayLanguage, recordResetEvent, getBehaviorState, calculateAlignmentScore } from "../utils/behaviorStore";
-import { chatCompletion, type LLMMessage } from "../../services/llm";
 import { buildSystemPrompt, getAgentWelcome, type AgentId, type AgentContext } from "../../services/agentPrompts";
 import { useAuth } from "../contexts/AuthContext";
 import { getDocument, updateDocument, queryCollection, where } from "../../services/firestore";
 import { detectMode } from "../utils/agentLayer";
-import { createAgentModel, startAgentChat, type ChatSession, type GenerativeModel } from "../../services/gemini";
+import { createAgentModel, startAgentChat, type ChatSession, type GenerativeModel, type LLMMessage } from "../../services/gemini";
 import { executeAction, type ActionProposal } from "../../services/agentActions";
 import type { Program } from "../../services/programGenerator";
 import type { EnhancedGenerateContentResponse } from "firebase/ai";
@@ -263,18 +262,10 @@ export default function AIAgent() {
     if (containsResetLanguage(userInput)) recordResetEvent();
 
     try {
-      // Try Gemini first
       await handleGeminiSend(userInput);
     } catch (geminiErr) {
-      console.warn("[AIAgent] Gemini failed, trying llm.ts fallback:", geminiErr);
-
-      try {
-        // Fallback to llm.ts (Groq/Together/OpenRouter)
-        await handleLLMFallback(userInput);
-      } catch (llmErr) {
-        console.warn("[AIAgent] LLM fallback failed, using agentLayer templates:", llmErr);
-        handleTemplateFallback(userInput);
-      }
+      console.warn("[AIAgent] Gemini failed, using template fallback:", geminiErr);
+      handleTemplateFallback(userInput);
     } finally {
       setIsThinking(false);
     }
@@ -362,45 +353,7 @@ export default function AIAgent() {
     deliverFriction();
   };
 
-  /** Secondary fallback: llm.ts providers */
-  const handleLLMFallback = async (userInput: string) => {
-    const mode = detectMode(userInput);
-    const behaviorState = getBehaviorState();
-    const frictionDecision = shouldDeliverFriction();
-
-    const context: AgentContext = {
-      behaviorState,
-      userProfile,
-      conversationMode: mode,
-      frictionFlag: frictionDecision.eligible ? frictionDecision.flag : undefined,
-      activeProgram: activeProgram ? {
-        name: activeProgram.name,
-        currentWeek: activeProgram.weeks[0]?.weekNumber ?? 1,
-        currentDay: activeProgram.weeks[0]?.days[0]?.name ?? "Day 1",
-        totalWeeks: activeProgram.weeks.length,
-      } : null,
-    };
-    const systemPrompt = buildSystemPrompt(currentAgent as AgentId, context);
-
-    const llmMessages: LLMMessage[] = [
-      { role: "system", content: systemPrompt },
-      ...conversationHistory.slice(-20),
-      { role: "user", content: userInput },
-    ];
-
-    const response = await chatCompletion(llmMessages, { temperature: 0.8, maxTokens: 256 });
-
-    setConversationHistory(prev => [
-      ...prev.slice(-18),
-      { role: "user" as const, content: userInput },
-      { role: "assistant" as const, content: response },
-    ]);
-
-    addAgentMessage(response, mode);
-    deliverFriction();
-  };
-
-  /** Final fallback: template-based agentLayer */
+  /** Fallback: template-based agentLayer */
   const handleTemplateFallback = (userInput: string) => {
     const { mode, response } = getAgentResponse(userInput);
     addAgentMessage(response, mode);

@@ -1,6 +1,7 @@
 import {
   doc,
   getDoc,
+  getDocFromServer,
   setDoc,
   updateDoc,
   deleteDoc,
@@ -18,9 +19,15 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 
-// Generic typed get
+// Generic typed get (may return cached data with persistence enabled)
 export async function getDocument<T = DocumentData>(path: string): Promise<T | null> {
   const snap = await getDoc(doc(db, path));
+  return snap.exists() ? ({ id: snap.id, ...snap.data() } as T) : null;
+}
+
+// Force a server read — bypasses persistent cache. Use after server-side writes (Cloud Functions).
+export async function getDocumentFresh<T = DocumentData>(path: string): Promise<T | null> {
+  const snap = await getDocFromServer(doc(db, path));
   return snap.exists() ? ({ id: snap.id, ...snap.data() } as T) : null;
 }
 
@@ -59,18 +66,43 @@ export function subscribeToDocument<T = DocumentData>(
   });
 }
 
-// Real-time collection listener
-export function subscribeToCollection<T = DocumentData>(
-  collectionPath: string,
-  constraints: QueryConstraint[],
-  callback: (data: T[]) => void
-): Unsubscribe {
-  const q = query(collection(db, collectionPath), ...constraints);
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }) as T));
-  });
+// Ensure a user doc exists with sensible defaults — only creates if doc is missing
+export async function ensureUserDoc(uid: string, extra?: Record<string, unknown>): Promise<void> {
+  const ref = doc(db, `users/${uid}`);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    await setDoc(ref, {
+      onboardingComplete: false,
+      createdAt: serverTimestamp(),
+      ...extra,
+    });
+  } else if (extra && Object.keys(extra).length > 0) {
+    await setDoc(ref, { ...extra, updatedAt: serverTimestamp() }, { merge: true });
+  }
+}
+
+// Atomic batch write — all-or-nothing for multiple document operations
+export async function batchWrite(
+  operations: Array<{
+    type: "set" | "update";
+    path: string;
+    data: DocumentData;
+    merge?: boolean;
+  }>
+): Promise<void> {
+  const { writeBatch } = await import("firebase/firestore");
+  const batch = writeBatch(db);
+  for (const op of operations) {
+    const ref = doc(db, op.path);
+    if (op.type === "set") {
+      batch.set(ref, { ...op.data, updatedAt: serverTimestamp() }, { merge: op.merge ?? true });
+    } else {
+      batch.update(ref, { ...op.data, updatedAt: serverTimestamp() });
+    }
+  }
+  await batch.commit();
 }
 
 // Re-export constraint builders for convenience
 export { where, orderBy, limit, serverTimestamp };
-export { increment } from "firebase/firestore";
+export { increment, arrayUnion, arrayRemove } from "firebase/firestore";

@@ -40,7 +40,7 @@ export default class ErrorBoundary extends Component<Props, State> {
             SYSTEM MALFUNCTION
           </p>
           <p className="font-['JetBrains_Mono',monospace] text-white/40 text-xs mb-6">
-            {this.state.error?.message || "An unexpected error occurred"}
+            {import.meta.env.DEV ? (this.state.error?.message || "An unexpected error occurred") : "An unexpected error occurred"}
           </p>
           <button
             onClick={this.handleRetry}

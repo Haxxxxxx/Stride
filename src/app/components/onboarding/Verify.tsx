@@ -1,12 +1,13 @@
 import image_ed2679aab5c84af8a717c4d8b5f3c6d516a31e51 from 'figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.png'
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
-import imgRectangle7 from "figma:asset/dc33bf4dcbc192d6dda86d23d93b5f6dced4ef05.png";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { isEmailSignInLink, completeEmailSignIn, sendEmailSignInLink } from "../../../services/auth";
+import { routeAfterAuth } from "../../utils/routeAfterAuth";
 
 export default function Verify() {
   const { email, setEmail } = useOnboardingStore();
+  const hasHydrated = useOnboardingStore.persist.hasHydrated();
   const navigate = useNavigate();
   const [status, setStatus] = useState<"waiting" | "completing" | "success" | "error">("waiting");
   const [error, setError] = useState("");
@@ -14,32 +15,36 @@ export default function Verify() {
   const [fallbackEmail, setFallbackEmail] = useState("");
   const [needsEmail, setNeedsEmail] = useState(false);
   const [cooldown, setCooldown] = useState(0);
+  const completionAttempted = useRef(false);
 
-  // Check if user arrived via email link click
+  // Check if user arrived via email link click — waits for Zustand hydration
   useEffect(() => {
-    if (isEmailSignInLink(window.location.href)) {
-      setStatus("completing");
-      const storedEmail = email || window.localStorage.getItem("emailForSignIn") || "";
-      if (!storedEmail) {
-        // Edge case: link opened in different browser — prompt for email
-        setNeedsEmail(true);
-        setError("Please enter your email to complete sign-in");
-        setStatus("error");
-        return;
-      }
-      completeEmailSignIn(storedEmail, window.location.href)
-        .then(() => {
-          window.localStorage.removeItem("emailForSignIn");
-          setStatus("success");
-          navigate("/onboarding/beta");
-        })
-        .catch((err: unknown) => {
-          const firebaseErr = err as { message?: string };
-          setError(firebaseErr.message || "Sign-in link expired or invalid");
-          setStatus("error");
-        });
+    if (!hasHydrated) return;
+    if (completionAttempted.current) return;
+    if (!isEmailSignInLink(window.location.href)) return;
+
+    completionAttempted.current = true;
+    setStatus("completing");
+    const storedEmail = email || window.localStorage.getItem("emailForSignIn") || "";
+    if (!storedEmail) {
+      // Edge case: link opened in different browser — prompt for email
+      setNeedsEmail(true);
+      setError("Please enter your email to complete sign-in");
+      setStatus("error");
+      return;
     }
-  }, []);
+    completeEmailSignIn(storedEmail, window.location.href)
+      .then((result) => {
+        window.localStorage.removeItem("emailForSignIn");
+        setStatus("success");
+        if (result.user?.uid) return routeAfterAuth(result.user.uid, navigate);
+      })
+      .catch((err: unknown) => {
+        const firebaseErr = err as { message?: string };
+        setError(firebaseErr.message || "Sign-in link expired or invalid");
+        setStatus("error");
+      });
+  }, [hasHydrated, email]);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -65,10 +70,10 @@ export default function Verify() {
     setStatus("completing");
     setError("");
     try {
-      await completeEmailSignIn(fallbackEmail, window.location.href);
+      const result = await completeEmailSignIn(fallbackEmail, window.location.href);
       window.localStorage.removeItem("emailForSignIn");
       setStatus("success");
-      navigate("/onboarding/beta");
+      if (result.user?.uid) await routeAfterAuth(result.user.uid, navigate);
     } catch (err: unknown) {
       const firebaseErr = err as { message?: string };
       setError(firebaseErr.message || "Sign-in link expired or invalid");

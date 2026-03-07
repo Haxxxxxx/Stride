@@ -1,12 +1,13 @@
 import { useState, useEffect } from "react";
 import { Navigate, Outlet } from "react-router";
 import { useAuth } from "../contexts/AuthContext";
-import { getDocument } from "../../services/firestore";
+import { getDocumentFresh } from "../../services/firestore";
 
 export default function ProtectedRoute() {
   const { user, loading } = useAuth();
   const [onboardingChecked, setOnboardingChecked] = useState(false);
   const [onboardingComplete, setOnboardingComplete] = useState(false);
+  const [betaValidated, setBetaValidated] = useState(false);
   const [timedOut, setTimedOut] = useState(false);
 
   useEffect(() => {
@@ -18,10 +19,11 @@ export default function ProtectedRoute() {
     if (!user) return;
     let cancelled = false;
 
-    getDocument<{ onboardingComplete?: boolean }>(`users/${user.uid}`)
+    getDocumentFresh<{ onboardingComplete?: boolean; betaValidated?: boolean }>(`users/${user.uid}`)
       .then((doc) => {
         if (cancelled) return;
         setOnboardingComplete(doc?.onboardingComplete === true);
+        setBetaValidated(doc?.betaValidated === true);
         setOnboardingChecked(true);
       })
       .catch(() => {
@@ -62,6 +64,10 @@ export default function ProtectedRoute() {
 
   if (!user) {
     return <Navigate to="/onboarding/welcome" replace />;
+  }
+
+  if (!betaValidated) {
+    return <Navigate to="/onboarding/beta" replace />;
   }
 
   if (!onboardingComplete) {

@@ -8,6 +8,7 @@ import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.
 import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { useAuth } from "../../contexts/AuthContext";
 import { sendEmailSignInLink, signInWithGoogle, signInWithWallet } from "../../../services/auth";
+import { routeAfterAuth } from "../../utils/routeAfterAuth";
 
 export default function Welcome() {
   const navigate = useNavigate();
@@ -15,8 +16,8 @@ export default function Welcome() {
   const { email, setEmail } = useOnboardingStore();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  // Track whether the user initiated auth on this page (vs stale session)
-  const authInitiated = useRef(false);
+  // Track if wallet connect was explicitly initiated by the user this session
+  const walletInitiated = useRef(false);
 
   const handleContinue = async () => {
     if (!email) return;
@@ -45,13 +46,12 @@ export default function Welcome() {
   const handleGoogleSignIn = async () => {
     setError("");
     setLoading(true);
-    authInitiated.current = true;
     try {
       const result = await signInWithGoogle();
       // result is null when redirect flow is used (mobile)
       if (result) {
         setEmail(result.user.email || "");
-        navigate("/onboarding/beta");
+        await routeAfterAuth(result.user.uid, navigate);
       }
     } catch (err: unknown) {
       const firebaseErr = err as { message?: string };
@@ -63,43 +63,70 @@ export default function Welcome() {
 
   const wallet = useWallet();
   const walletModal = useWalletModal();
+  // Track the wallet name selected during THIS connect flow (ignore cached selections)
+  const selectedWalletName = useRef<string | null>(null);
+  // Track which pubkey we've already started auth for — prevents double-fire
+  const authedPubkey = useRef<string | null>(null);
 
-  // When user selects a wallet from the modal, trigger connect()
+  // When user selects a wallet from the modal, close the modal and trigger connect()
   useEffect(() => {
-    if (wallet.wallet && !wallet.connected && !wallet.connecting) {
-      wallet.connect().catch((err: unknown) => {
-        const e = err as { message?: string };
-        setError(e.message || "Wallet connection failed");
-        setLoading(false);
-      });
+    if (!walletInitiated.current) return;
+    // Only connect if this wallet was selected AFTER the modal was opened
+    if (wallet.wallet && wallet.wallet.adapter.name !== selectedWalletName.current) {
+      selectedWalletName.current = wallet.wallet.adapter.name;
+      if (!wallet.connected && !wallet.connecting) {
+        if (walletModal.visible) walletModal.setVisible(false);
+        wallet.connect().catch((err: unknown) => {
+          const e = err as { message?: string };
+          setError(e.message || "Wallet connection failed");
+          setLoading(false);
+        });
+      }
     }
     // If modal was opened but no wallet was selected (user dismissed), reset loading
-    if (!wallet.wallet && !walletModal.visible && loading && authInitiated.current) {
+    if (!wallet.wallet && !walletModal.visible && loading && walletInitiated.current) {
       setLoading(false);
     }
   }, [wallet.wallet, wallet.connected, wallet.connecting, walletModal.visible]);
 
-  // After wallet connects and publicKey is available, authenticate with Firebase (no signature)
+  // After wallet connects and publicKey is available, authenticate with Firebase via signature
   useEffect(() => {
-    if (!wallet.publicKey) return;
+    if (!walletInitiated.current) return;
+    if (!wallet.publicKey || !wallet.signMessage) return;
+    if (user) return;
+
     const pubkey = wallet.publicKey.toBase58();
+    // Skip if we already started auth for this exact pubkey
+    if (authedPubkey.current === pubkey) return;
+    authedPubkey.current = pubkey;
+
     setLoading(true);
-    signInWithWallet(pubkey)
-      .then(() => {
-        navigate("/onboarding/beta");
+    signInWithWallet(pubkey, wallet.signMessage)
+      .then((cred) => {
+        return routeAfterAuth(cred.user.uid, navigate);
       })
       .catch((err: unknown) => {
         const e = err as { message?: string };
         setError(e.message || "Wallet authentication failed");
+        // Clear so user can retry with same or different wallet
+        authedPubkey.current = null;
       })
       .finally(() => setLoading(false));
-  }, [wallet.publicKey]);
+  }, [wallet.publicKey, user]);
 
-  const handleWalletConnect = () => {
+  const handleWalletConnect = async () => {
     setError("");
     setLoading(true);
-    authInitiated.current = true;
-    // Open the wallet selector modal — user picks from installed browser wallets
+    walletInitiated.current = true;
+    selectedWalletName.current = null;
+    authedPubkey.current = null;
+    // Disconnect any cached wallet so the modal shows a fresh selection
+    if (wallet.connected) {
+      await wallet.disconnect();
+    }
+    if (wallet.wallet) {
+      wallet.select(null);
+    }
     walletModal.setVisible(true);
   };
 

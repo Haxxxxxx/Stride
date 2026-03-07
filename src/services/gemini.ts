@@ -5,7 +5,7 @@
 import {
   getAI,
   getGenerativeModel,
-  VertexAIBackend,
+  GoogleAIBackend,
   SchemaType,
   type FunctionDeclaration,
   type Content,
@@ -14,13 +14,16 @@ import {
   type ObjectSchemaRequest,
 } from "firebase/ai";
 import { app } from "./firebase";
-import type { LLMMessage } from "./llm";
+export interface LLMMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
 
 // ============================================================
-// Initialize Firebase AI (Vertex AI backend — uses project billing, no free-tier quota issues)
+// Initialize Firebase AI (Google AI backend — Gemini Developer API, fast + free tier)
 // ============================================================
 
-const ai = getAI(app, { backend: new VertexAIBackend() });
+const ai = getAI(app, { backend: new GoogleAIBackend() });
 
 // ============================================================
 // Tool Declarations for Agentic Actions
@@ -172,7 +175,7 @@ const agentTools: FunctionDeclaration[] = [
  */
 export function createAgentModel(systemInstruction: string): GenerativeModel {
   return getGenerativeModel(ai, {
-    model: "gemini-2.0-flash",
+    model: "gemini-2.5-flash-lite",
     systemInstruction,
     tools: [{ functionDeclarations: agentTools }],
     generationConfig: {
@@ -187,7 +190,7 @@ export function createAgentModel(systemInstruction: string): GenerativeModel {
  */
 export function createProgramModel(systemInstruction: string): GenerativeModel {
   return getGenerativeModel(ai, {
-    model: "gemini-2.0-flash",
+    model: "gemini-2.5-flash-lite",
     systemInstruction,
     generationConfig: {
       temperature: 0.6,
@@ -248,19 +251,6 @@ export function startAgentChat(
   history?: Content[]
 ): ChatSession {
   return model.startChat(history ? { history } : undefined);
-}
-
-/**
- * Convert internal LLMMessage[] to Gemini Content[] for seeding chat history.
- * System messages are excluded (they go into systemInstruction).
- */
-export function toLLMHistory(messages: LLMMessage[]): Content[] {
-  return messages
-    .filter((m) => m.role !== "system")
-    .map((m) => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }],
-    }));
 }
 
 export type { ChatSession, GenerativeModel, Content };
