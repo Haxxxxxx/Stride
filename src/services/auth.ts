@@ -17,6 +17,7 @@ import { auth, functions } from "./firebase";
 const googleProvider = new GoogleAuthProvider();
 
 // Passwordless email link auth via Firebase built-in sender
+// TODO: Switch to sendSignInEmail Cloud Function when SMTP credentials are available
 export async function sendEmailSignInLink(email: string) {
   const continueUrl = `${window.location.origin}/onboarding/verify`;
   await sendSignInLinkToEmail(auth, email, {

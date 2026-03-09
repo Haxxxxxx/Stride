@@ -1,9 +1,18 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
+import { defineSecret } from "firebase-functions/params";
 import * as admin from "firebase-admin";
 import * as nacl from "tweetnacl";
 import bs58 from "bs58";
+import * as nodemailer from "nodemailer";
 
 admin.initializeApp();
+
+// SMTP secrets — set via: firebase functions:secrets:set SMTP_HOST, etc.
+const smtpHost = defineSecret("SMTP_HOST");
+const smtpPort = defineSecret("SMTP_PORT");
+const smtpUser = defineSecret("SMTP_USER");
+const smtpPass = defineSecret("SMTP_PASS");
+const smtpFrom = defineSecret("SMTP_FROM");
 
 /**
  * Wallet sign-in — creates a persistent Firebase identity linked to a Solana wallet.
@@ -133,4 +142,156 @@ export const validateBetaCode = onCall(async (request) => {
 
   return { success: true };
 });
+
+/**
+ * Send a branded sign-in email with a magic link.
+ * Uses Admin SDK to generate the link + nodemailer for custom HTML email.
+ * Rate limited: 1 email per 60s per address.
+ */
+export const sendSignInEmail = onCall(
+  { secrets: [smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom] },
+  async (request) => {
+    const email = request.data?.email;
+    if (!email || typeof email !== "string" || !/^.+@.+\..+$/.test(email)) {
+      throw new HttpsError("invalid-argument", "A valid email is required.");
+    }
+
+    const continueUrl = request.data?.continueUrl;
+    if (!continueUrl || typeof continueUrl !== "string") {
+      throw new HttpsError("invalid-argument", "continueUrl is required.");
+    }
+
+    // Rate limit: 1 email per 60s per address
+    const firestore = admin.firestore();
+    const rateLimitRef = firestore.doc(`_rateLimit/email_${email.toLowerCase()}`);
+    const rateLimitSnap = await rateLimitRef.get();
+    if (rateLimitSnap.exists) {
+      const lastSent = rateLimitSnap.data()?.timestamp?.toMillis?.() ?? 0;
+      if (Date.now() - lastSent < 60_000) {
+        throw new HttpsError("resource-exhausted", "Please wait before requesting another email.");
+      }
+    }
+
+    // Generate the sign-in link via Admin SDK
+    const actionCodeSettings = {
+      url: continueUrl,
+      handleCodeInApp: true,
+    };
+
+    let signInLink: string;
+    try {
+      signInLink = await admin.auth().generateSignInWithEmailLink(email, actionCodeSettings);
+    } catch (err: unknown) {
+      console.error("generateSignInWithEmailLink failed:", err);
+      throw new HttpsError("internal", "Failed to generate sign-in link.");
+    }
+
+    // Send branded email
+    const transporter = nodemailer.createTransport({
+      host: smtpHost.value(),
+      port: Number(smtpPort.value()) || 587,
+      secure: Number(smtpPort.value()) === 465,
+      auth: {
+        user: smtpUser.value(),
+        pass: smtpPass.value(),
+      },
+    });
+
+    const htmlEmail = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#000000;font-family:'Courier New',monospace;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#000000;min-height:100vh;">
+    <tr>
+      <td align="center" style="padding:40px 20px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:460px;">
+          <!-- Header -->
+          <tr>
+            <td style="padding-bottom:32px;text-align:center;">
+              <div style="font-size:28px;font-weight:bold;color:#ff6600;letter-spacing:6px;text-transform:uppercase;">
+                STRIDE
+              </div>
+              <div style="font-size:9px;color:rgba(255,255,255,0.4);letter-spacing:3px;text-transform:uppercase;margin-top:6px;">
+                Training Operating System
+              </div>
+            </td>
+          </tr>
+
+          <!-- Main card -->
+          <tr>
+            <td style="border:1px solid rgba(255,255,255,0.15);padding:32px 28px;background-color:rgba(255,255,255,0.02);">
+              <div style="font-size:16px;font-weight:bold;color:#ffffff;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px;">
+                System Access Requested
+              </div>
+              <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:28px;">
+                Tap below to authenticate and enter the system.
+              </div>
+
+              <!-- CTA Button -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td align="center">
+                    <a href="${signInLink}" target="_blank"
+                       style="display:inline-block;background-color:#ff6600;color:#000000;font-size:12px;font-weight:bold;text-transform:uppercase;letter-spacing:2px;padding:14px 40px;text-decoration:none;border:2px solid #ff6600;">
+                      Authenticate →
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+              <div style="margin-top:28px;padding-top:20px;border-top:1px solid rgba(255,255,255,0.08);">
+                <div style="font-size:9px;color:rgba(255,255,255,0.3);line-height:1.6;">
+                  This link expires in 1 hour.<br>
+                  If you didn't request access, ignore this message.
+                </div>
+              </div>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding-top:24px;text-align:center;">
+              <div style="font-size:8px;color:rgba(255,255,255,0.2);letter-spacing:1px;text-transform:uppercase;">
+                Stride Fitness Systems · Secure Authentication Protocol
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+    const textEmail = `STRIDE — System Access
+
+Tap the link below to authenticate:
+${signInLink}
+
+This link expires in 1 hour.
+If you didn't request access, ignore this message.`;
+
+    try {
+      await transporter.sendMail({
+        from: `"STRIDE" <${smtpFrom.value()}>`,
+        to: email,
+        subject: "STRIDE — Authenticate",
+        text: textEmail,
+        html: htmlEmail,
+      });
+    } catch (err: unknown) {
+      console.error("sendMail failed:", err);
+      throw new HttpsError("internal", "Failed to send email.");
+    }
+
+    // Update rate limit
+    await rateLimitRef.set({ timestamp: admin.firestore.FieldValue.serverTimestamp() });
+
+    return { success: true };
+  }
+);
 

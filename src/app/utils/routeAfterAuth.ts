@@ -1,5 +1,6 @@
 import type { NavigateFunction } from "react-router";
-import { getDocument, ensureUserDoc } from "../../services/firestore";
+import { getDocumentFresh, ensureUserDoc } from "../../services/firestore";
+import { auth } from "../../services/firebase";
 
 /**
  * Central post-auth routing logic.
@@ -7,13 +8,37 @@ import { getDocument, ensureUserDoc } from "../../services/firestore";
  * - onboardingComplete → /app
  * - betaValidated → /onboarding/profile
  * - default → /onboarding/beta
+ *
+ * Uses server reads (not cache) to avoid stale betaValidated/onboardingComplete.
+ * Retries once after a short delay if Firestore rejects due to auth token propagation lag.
  */
 export async function routeAfterAuth(uid: string, navigate: NavigateFunction): Promise<void> {
-  try {
+  const attempt = async () => {
+    // Force a fresh token so Firestore picks up the auth state
+    if (auth.currentUser) {
+      await auth.currentUser.getIdToken(true);
+    }
     await ensureUserDoc(uid);
-    const userDoc = await getDocument<{ onboardingComplete?: boolean; betaValidated?: boolean }>(
+    return getDocumentFresh<{ onboardingComplete?: boolean; betaValidated?: boolean }>(
       `users/${uid}`
     );
+  };
+
+  try {
+    let userDoc: { onboardingComplete?: boolean; betaValidated?: boolean } | null;
+    try {
+      userDoc = await attempt();
+    } catch (err: unknown) {
+      const code = (err as { code?: string }).code ?? "";
+      // Firestore hasn't received the auth token yet — retry after a brief settle
+      if (code === "permission-denied" || String(err).includes("permissions")) {
+        await new Promise((r) => setTimeout(r, 800));
+        userDoc = await attempt();
+      } else {
+        throw err;
+      }
+    }
+
     if (userDoc?.onboardingComplete) {
       navigate("/app", { replace: true });
       return;
