@@ -8,7 +8,7 @@ import { SystemMessage } from "./SystemMessage";
 import { getRandomMessage, getStreakMilestoneMessage } from "../utils/microLanguage";
 import { getBehaviorState, recordLogin } from "../utils/behaviorStore";
 import { useAuth } from "../contexts/AuthContext";
-import { subscribeToDocument, subscribeToCollection, queryCollection, where, orderBy, limit } from "../../services/firestore";
+import { subscribeToDocument, subscribeToCollection, queryCollection, updateDocument, where, orderBy, limit } from "../../services/firestore";
 import type { Program, WorkoutDay } from "../../services/programGenerator";
 
 interface DashboardWorkoutLog {
@@ -376,8 +376,13 @@ export default function Dashboard() {
       (logs) => {
         const map = new Map<string, DashboardWorkoutLog>();
         for (const log of logs) {
+          // Migrate stale "partial" logs from pre-fix bug (one-time patch)
+          if (log.completionType === "partial") {
+            updateDocument(`users/${user.uid}/workoutLogs/${log.id}`, { completionType: "full" }).catch(() => {});
+          }
           const dateKey = new Date(log.completedAt).toISOString().split("T")[0];
-          if (!map.has(dateKey)) map.set(dateKey, log);
+          // Treat all existing logs as full (the modal only saves on completion)
+          if (!map.has(dateKey)) map.set(dateKey, { ...log, completionType: "full" });
         }
         setWeekLogs(map);
       }

@@ -3,7 +3,7 @@ import svgPaths from "../../imports/svg-2gts8wf65t";
 import { CircularProgress } from "./CircularProgress";
 import { useState, useEffect } from "react";
 import { useAuth } from "../contexts/AuthContext";
-import { subscribeToCollection, orderBy, limit } from "../../services/firestore";
+import { subscribeToCollection, updateDocument, orderBy, limit } from "../../services/firestore";
 import { getBehaviorState } from "../utils/behaviorStore";
 
 interface WorkoutLog {
@@ -349,7 +349,16 @@ export default function Progress() {
     const unsub = subscribeToCollection<WorkoutLog>(
       `users/${user.uid}/workoutLogs`,
       [orderBy("completedAt", "desc"), limit(50)],
-      setLogs
+      (incoming) => {
+        // Migrate stale "partial" logs from pre-fix bug (one-time patch per log)
+        for (const log of incoming) {
+          if (log.completionType === "partial") {
+            updateDocument(`users/${user.uid}/workoutLogs/${log.id}`, { completionType: "full" }).catch(() => {});
+          }
+        }
+        // Treat all logs as full (modal only saves on completion screen)
+        setLogs(incoming.map(l => l.completionType === "partial" ? { ...l, completionType: "full" } : l));
+      }
     );
     return unsub;
   }, [user]);
