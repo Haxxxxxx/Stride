@@ -1,4 +1,4 @@
-import image_ed2679aab5c84af8a717c4d8b5f3c6d516a31e51 from 'figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.png'
+import image_ed2679aab5c84af8a717c4d8b5f3c6d516a31e51 from 'figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.webp'
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
 import { useOnboardingStore } from "../../../stores/onboardingStore";

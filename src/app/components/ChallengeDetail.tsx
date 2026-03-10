@@ -1,9 +1,9 @@
 import { Link, useParams } from "react-router";
 import { useState, useEffect } from "react";
-import imgImage8 from "figma:asset/24b6a62b7bae129c46221394e6598883d13abaec.png";
-import imgImage12 from "figma:asset/dd40dbe95c08e8ffafa5e44173f6b8033e5ccfed.png";
-import imgImage10 from "figma:asset/f66d8c8b01a14e7f20794613021e602bd29e44f5.png";
-import imgImage2 from "figma:asset/fa12b2e954b8d8835c7af0f64149782f3496b2f7.png";
+import imgImage8 from "figma:asset/24b6a62b7bae129c46221394e6598883d13abaec.webp";
+import imgImage12 from "figma:asset/dd40dbe95c08e8ffafa5e44173f6b8033e5ccfed.webp";
+import imgImage10 from "figma:asset/f66d8c8b01a14e7f20794613021e602bd29e44f5.webp";
+import imgImage2 from "figma:asset/fa12b2e954b8d8835c7af0f64149782f3496b2f7.webp";
 import { useAuth } from "../contexts/AuthContext";
 import { getDocument } from "../../services/firestore";
 import {

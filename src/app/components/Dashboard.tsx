@@ -1,6 +1,6 @@
 import { Link } from "react-router";
 import svgPaths from "../../imports/svg-2gts8wf65t";
-import imgRectangle6 from "figma:asset/c92ce858c610970c9ceacaa61f2a4aa8318c963d.png";
+import imgRectangle6 from "figma:asset/c92ce858c610970c9ceacaa61f2a4aa8318c963d.webp";
 import { CircularProgress } from "./CircularProgress";
 import { useState, useEffect } from "react";
 import { WorkoutSequenceModal } from "./WorkoutSequenceModal";
@@ -8,7 +8,7 @@ import { SystemMessage } from "./SystemMessage";
 import { getRandomMessage, getStreakMilestoneMessage } from "../utils/microLanguage";
 import { getBehaviorState, recordLogin } from "../utils/behaviorStore";
 import { useAuth } from "../contexts/AuthContext";
-import { subscribeToDocument, queryCollection, where, orderBy } from "../../services/firestore";
+import { subscribeToDocument, queryCollection, where, orderBy, limit } from "../../services/firestore";
 import type { Program, WorkoutDay } from "../../services/programGenerator";
 
 interface DashboardWorkoutLog {
@@ -21,7 +21,7 @@ function Avatar() {
   return (
     <div className="content-stretch flex items-center relative shrink-0 size-[50px]">
       <div className="aspect-[54/54] h-full relative shrink-0 border border-white/40">
-        <img alt="" className="absolute inset-0 max-w-none object-cover pointer-events-none size-full grayscale" src={imgRectangle6} />
+        <img alt="" className="absolute inset-0 max-w-none object-cover pointer-events-none size-full" src={imgRectangle6} />
       </div>
     </div>
   );
@@ -34,7 +34,7 @@ function TopBar({ callsign, avatarUrl, unreadCount }: { callsign: string; avatar
         {avatarUrl ? (
           <div className="content-stretch flex items-center relative shrink-0 size-[50px]">
             <div className="aspect-[54/54] h-full relative shrink-0 border border-white/40">
-              <img alt="" className="absolute inset-0 max-w-none object-cover pointer-events-none size-full grayscale" src={avatarUrl} />
+              <img alt="" className="absolute inset-0 max-w-none object-cover pointer-events-none size-full" src={avatarUrl} />
             </div>
           </div>
         ) : (
@@ -356,7 +356,7 @@ export default function Dashboard() {
     if (!user) return;
     queryCollection<{ id: string }>(
       `users/${user.uid}/notifications`,
-      [where("read", "==", false)]
+      [where("read", "==", false), limit(100)]
     ).then((docs) => setUnreadCount(docs.length)).catch(console.warn);
   }, [user]);
 
@@ -388,7 +388,7 @@ export default function Dashboard() {
     if (!user) return;
     queryCollection<Program & { id: string }>(
       `users/${user.uid}/programs`,
-      [where("active", "==", true)]
+      [where("active", "==", true), limit(1)]
     ).then((programs) => {
       if (programs.length > 0) {
         setActiveProgram(programs[0]);

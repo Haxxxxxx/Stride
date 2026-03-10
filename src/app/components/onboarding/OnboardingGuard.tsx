@@ -3,17 +3,25 @@ import { Navigate, Outlet, useLocation } from "react-router";
 import { useAuth } from "../../contexts/AuthContext";
 import { getDocumentFresh } from "../../../services/firestore";
 
+// Module-level flag — persists across mount/unmount cycles.
+// Once beta is confirmed, we never need to re-check.
+let confirmedBetaValidated = false;
+
 /**
  * Guards onboarding routes that require authentication.
  * Also enforces beta gate — routes beyond /onboarding/beta require betaValidated.
+ *
+ * This is the SINGLE source of truth for onboarding routing.
+ * BetaCode.tsx should NOT navigate on its own for skip checks — only after
+ * the user explicitly enters a code.
  */
 export default function OnboardingGuard() {
   const { user, loading } = useAuth();
   const location = useLocation();
   const [timedOut, setTimedOut] = useState(false);
-  const [betaValidated, setBetaValidated] = useState(false);
-  // Track which pathname was last successfully checked
-  const [checkedPath, setCheckedPath] = useState<string | null>(null);
+  const [checkState, setCheckState] = useState<"pending" | "done">(
+    confirmedBetaValidated ? "done" : "pending"
+  );
 
   useEffect(() => {
     const t = setTimeout(() => setTimedOut(true), 15000);
@@ -22,30 +30,38 @@ export default function OnboardingGuard() {
 
   const isBetaRoute = location.pathname === "/onboarding/beta";
 
+  // Check beta status once per session. The result is cached at module level
+  // so re-mounts (from navigation) don't re-fetch or lose state.
   useEffect(() => {
-    if (!user) return;
+    if (!user || confirmedBetaValidated) {
+      setCheckState("done");
+      return;
+    }
     if (isBetaRoute) {
-      setCheckedPath(location.pathname);
+      setCheckState("done");
       return;
     }
 
-    let cancelled = false;
+    // Fetch from server — don't use persistent cache
+    let active = true;
     getDocumentFresh<{ betaValidated?: boolean }>(`users/${user.uid}`)
       .then((doc) => {
-        if (cancelled) return;
-        setBetaValidated(doc?.betaValidated === true);
-        setCheckedPath(location.pathname);
+        if (!active) return;
+        if (doc?.betaValidated === true) {
+          confirmedBetaValidated = true;
+        }
+        setCheckState("done");
       })
       .catch(() => {
-        if (!cancelled) setCheckedPath(location.pathname);
+        // On error, still mark done — will redirect to beta (fail-closed)
+        if (active) setCheckState("done");
       });
-    return () => { cancelled = true; };
-  }, [user?.uid, location.pathname]);
 
-  // True only when we've completed a check for this exact path
-  const betaChecked = checkedPath === location.pathname;
+    return () => { active = false; };
+  }, [user?.uid, isBetaRoute]);
 
-  if (loading || (user && !isBetaRoute && !betaChecked)) {
+  // Show loading while checking (but not on the beta route itself)
+  if (loading || (user && !isBetaRoute && checkState === "pending")) {
     return (
       <div className="bg-black w-full h-full flex items-center justify-center">
         {timedOut ? (
@@ -71,9 +87,20 @@ export default function OnboardingGuard() {
     return <Navigate to="/onboarding/welcome" replace />;
   }
 
-  if (!isBetaRoute && !betaValidated) {
+  // If on beta route but already validated → skip to profile
+  if (isBetaRoute && confirmedBetaValidated) {
+    return <Navigate to="/onboarding/profile" replace />;
+  }
+
+  // If NOT on beta route and NOT validated → go to beta
+  if (!isBetaRoute && !confirmedBetaValidated) {
     return <Navigate to="/onboarding/beta" replace />;
   }
 
   return <Outlet />;
+}
+
+/** Call this after successfully validating a beta code to update the guard state */
+export function markBetaValidated() {
+  confirmedBetaValidated = true;
 }

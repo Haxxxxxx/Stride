@@ -1,10 +1,10 @@
-import image_649dc395704951058b9543ab59c196ca800a5539 from 'figma:asset/649dc395704951058b9543ab59c196ca800a5539.png'
-import image_ed2679aab5c84af8a717c4d8b5f3c6d516a31e51 from 'figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.png'
+import image_649dc395704951058b9543ab59c196ca800a5539 from 'figma:asset/649dc395704951058b9543ab59c196ca800a5539.webp'
+import image_ed2679aab5c84af8a717c4d8b5f3c6d516a31e51 from 'figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.webp'
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
-import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.png";
+import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.webp";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { useAuth } from "../../contexts/AuthContext";
 import { sendEmailSignInLink, signInWithGoogle, signInWithWallet } from "../../../services/auth";

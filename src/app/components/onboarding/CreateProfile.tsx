@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.png";
+import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.webp";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { useAuth } from "../../contexts/AuthContext";
 import { setDocument } from "../../../services/firestore";

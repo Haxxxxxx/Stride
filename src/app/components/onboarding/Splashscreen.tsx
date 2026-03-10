@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router";
-import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.png";
+import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.webp";
 import { useAuth } from "../../contexts/AuthContext";
 import { routeAfterAuth } from "../../utils/routeAfterAuth";
 

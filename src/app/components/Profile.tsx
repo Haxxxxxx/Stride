@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router";
-import imgRectangle6 from "figma:asset/c92ce858c610970c9ceacaa61f2a4aa8318c963d.png";
+import imgRectangle6 from "figma:asset/c92ce858c610970c9ceacaa61f2a4aa8318c963d.webp";
 import { useState, useRef, useEffect } from "react";
 import { logOut } from "../../services/auth";
 import { useAuth } from "../contexts/AuthContext";
@@ -84,7 +84,7 @@ function ProfileEditor() {
           className={`size-[80px] border border-white/40 relative ${isEditing ? 'cursor-pointer hover:border-[#ff6600]' : ''}`}
           onClick={handleImageClick}
         >
-          <img alt="" className="w-full h-full object-cover grayscale" src={profileImage} />
+          <img alt="" className="w-full h-full object-cover" src={profileImage} />
           {isEditing && (
             <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
               <svg className="size-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">

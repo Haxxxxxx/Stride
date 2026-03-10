@@ -1,11 +1,12 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { useNavigate } from "react-router";
-import imgRectangle7 from "figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.png";
+import imgRectangle7 from "figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.webp";
 import { httpsCallable } from "firebase/functions";
 import { functions } from "../../../services/firebase";
 import { useAuth } from "../../contexts/AuthContext";
 import { logOut } from "../../../services/auth";
 import { getDocumentFresh } from "../../../services/firestore";
+import { markBetaValidated } from "./OnboardingGuard";
 
 export default function BetaCode() {
   const navigate = useNavigate();
@@ -13,27 +14,7 @@ export default function BetaCode() {
   const [code, setCode] = useState(["", "", "", "", "", ""]);
   const [error, setError] = useState("");
   const [verifying, setVerifying] = useState(false);
-  const [verified, setVerified] = useState(false);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
-
-  // Skip beta screen if user already validated a code
-  const skipChecked = useRef(false);
-  useEffect(() => {
-    if (!user || verified || skipChecked.current) return;
-    skipChecked.current = true;
-    getDocumentFresh<{ betaValidated?: boolean; onboardingComplete?: boolean }>(`users/${user.uid}`)
-      .then((doc) => {
-        if (doc?.onboardingComplete) {
-          navigate("/app", { replace: true });
-        } else if (doc?.betaValidated) {
-          setVerified(true);
-          navigate("/onboarding/profile", { replace: true });
-        }
-      })
-      .catch((err) => {
-        console.error("Beta check failed:", err);
-      });
-  }, [user?.uid]);
 
   const handleChange = (index: number, value: string) => {
     const clean = value.replace(/[^A-Z0-9]/gi, '').toUpperCase();
@@ -97,7 +78,9 @@ export default function BetaCode() {
       // Force a server read to refresh the local Firestore cache with the
       // server-set betaValidated flag (set by the Cloud Function above)
       await getDocumentFresh(`users/${user.uid}`);
-      setVerified(true);
+      // Tell the guard that beta is validated before navigating —
+      // this prevents the guard from redirecting back to /beta
+      markBetaValidated();
       navigate("/onboarding/profile", { replace: true });
     } catch (err: unknown) {
       const firebaseErr = err as { code?: string; message?: string };
