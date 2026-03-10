@@ -213,41 +213,44 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
       rest: currentExercise?.rest ?? "60s",
       actualSets: setData,
     };
-    setExerciseLogs((prev) => [...prev, log]);
 
     if (currentExerciseIdx < exercises.length - 1) {
+      setExerciseLogs((prev) => [...prev, log]);
       setCurrentExerciseIdx(currentExerciseIdx + 1);
       setCurrentSet(1);
       setCurrentSetData([]);
       setStatus("active");
     } else {
-      handleComplete();
+      // Last exercise — build final logs array synchronously to avoid stale state
+      const finalLogs = [...exerciseLogs, log];
+      setExerciseLogs(finalLogs);
+      handleComplete(finalLogs);
     }
   };
 
-  const handleComplete = () => {
+  const handleComplete = (finalLogs: ExerciseLog[]) => {
     setStatus("initializing");
     completionDelayRef.current = setTimeout(() => {
       recordWorkoutCompleted();
 
       // Calculate total volume
-      const totalVolume = exerciseLogs.reduce((sum, ex) =>
+      const totalVolume = finalLogs.reduce((sum, ex) =>
         sum + ex.actualSets.reduce((s, set) => s + set.weight * set.repsCompleted, 0), 0
       );
-      const avgRPE = exerciseLogs.length > 0
-        ? exerciseLogs.reduce((sum, ex) =>
+      const avgRPE = finalLogs.length > 0
+        ? finalLogs.reduce((sum, ex) =>
             sum + ex.actualSets.reduce((s, set) => s + set.rpe, 0) / Math.max(ex.actualSets.length, 1), 0
-          ) / exerciseLogs.length
+          ) / finalLogs.length
         : 0;
 
       if (user) {
         const logId = `log_${Date.now()}`;
         setDocument(`users/${user.uid}/workoutLogs/${logId}`, {
           workoutName,
-          exercises: exerciseLogs,
+          exercises: finalLogs,
           duration: timer,
           completedAt: new Date().toISOString(),
-          completionType: exerciseLogs.length >= exercises.length ? "full" : "partial",
+          completionType: finalLogs.length >= exercises.length ? "full" : "partial",
           readiness,
           totalVolume,
           avgRPE: Math.round(avgRPE * 10) / 10,
