@@ -186,19 +186,25 @@ export function getBehaviorState(): BehaviorState {
     localStorage.setItem(STORE_KEY, JSON.stringify(state));
   }
 
-  // Roll off 14d/30d counters when their window expires
+  // Roll off 14d/30d counters when their window expires (also initialize on first use)
   const now = Date.now();
   const MS_14D = 14 * 24 * 60 * 60 * 1000;
   const MS_30D = 30 * 24 * 60 * 60 * 1000;
   let rolled = false;
-  if (state.windowStart14d && now - state.windowStart14d > MS_14D) {
+  if (!state.windowStart14d) {
+    state.windowStart14d = now;
+    rolled = true;
+  } else if (now - state.windowStart14d > MS_14D) {
     state.workoutsCompleted14d = 0;
     state.workoutsSkipped14d = 0;
     state.resetEvents14d = 0;
     state.windowStart14d = now;
     rolled = true;
   }
-  if (state.windowStart30d && now - state.windowStart30d > MS_30D) {
+  if (!state.windowStart30d) {
+    state.windowStart30d = now;
+    rolled = true;
+  } else if (now - state.windowStart30d > MS_30D) {
     state.resetEvents30d = 0;
     state.windowStart30d = now;
     rolled = true;
