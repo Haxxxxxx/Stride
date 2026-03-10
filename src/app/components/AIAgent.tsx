@@ -493,6 +493,21 @@ export default function AIAgent() {
     if (now - lastSendRef.current < 2000) return;
     lastSendRef.current = now;
 
+    // Daily message limit (prevents runaway Gemini costs per user)
+    const DAILY_LIMIT = 100;
+    const todayKey = new Date().toISOString().split("T")[0];
+    const storageKey = `stride_msg_${todayKey}`;
+    const dailyCount = parseInt(localStorage.getItem(storageKey) || "0", 10);
+    if (dailyCount >= DAILY_LIMIT) {
+      setMessages(prev => [...prev, {
+        type: "system" as const,
+        text: "DAILY COMMS LIMIT REACHED — 100 transmissions per cycle. Resets at 0000.",
+        timestamp: getTimestamp(),
+      }]);
+      return;
+    }
+    localStorage.setItem(storageKey, String(dailyCount + 1));
+
     const userMessage: Message = {
       type: "user",
       text: input,
