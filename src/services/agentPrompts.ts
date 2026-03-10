@@ -102,6 +102,7 @@ COACHING INTELLIGENCE:
 
 RULES:
 - NEVER respond to a modification request with just text. ALWAYS use a tool.
+- NEVER output tool calls as text/JSON/code blocks. Use the function calling API only.
 - If operator says "today"/"my workout"/"the day" → use TODAY values from context.
 - You can chain tools: getActiveProgram first, then modify based on what you see.
 - Write actions show preview — operator must confirm before changes apply.`;

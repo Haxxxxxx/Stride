@@ -672,11 +672,12 @@ export default function AIAgent() {
       const text = safeText(response);
       if (!text) throw new Error("Empty Gemini response");
 
-      // Detect if Gemini output a function call as text (e.g. "regenerateDay(1, 2, 'back')")
-      // This happens when the chat session (no tools) tries to "call" a function
-      // Only match known tool names to avoid false-positives on normal text
-      const textCallMatch = text.match(/\b(getActiveProgram|swapExercise|adjustVolume|skipWorkoutDay|regenerateDay|regenerateWeek|generateDeloadWeek|getRecentPerformance)\s*\(/);
-      if (textCallMatch && !useTools && toolSession) {
+      // Detect if Gemini output a function call as text instead of using proper function calling.
+      // Catches both formats: functionName( and JSON {"tool_name": "functionName"} / {"tool_code": "functionName"}
+      const KNOWN_TOOLS = "getActiveProgram|swapExercise|adjustVolume|skipWorkoutDay|regenerateDay|regenerateWeek|generateDeloadWeek|getRecentPerformance";
+      const textCallMatch = text.match(new RegExp(`\\b(${KNOWN_TOOLS})\\s*\\(`)) ||
+        text.match(new RegExp(`"(?:tool_name|tool_code)"\\s*:\\s*"(${KNOWN_TOOLS})"`));
+      if (textCallMatch && toolSession) {
         // Re-send to tool session so it can make the actual function call
         const retryResult = await sendWithRetry(toolSession, userInput);
         const retryFCs = retryResult.response.functionCalls();
@@ -686,7 +687,7 @@ export default function AIAgent() {
           deliverFriction();
           return;
         }
-        // If still no function call, show the retry text
+        // If still no function call, strip the JSON/code block and show just the natural text
         const retryText = safeText(retryResult.response);
         if (retryText) {
           addAgentMessage(retryText);
@@ -702,8 +703,13 @@ export default function AIAgent() {
         toolConversationRef.current = false;
       }
 
+      // Strip any leaked tool JSON blocks from displayed text
+      const cleanText = text
+        .replace(/```json\s*\{[\s\S]*?"(?:tool_name|tool_code)"[\s\S]*?\}\s*```/g, "")
+        .replace(/\{[\s\S]*?"(?:tool_name|tool_code)"[\s\S]*?\}/g, "")
+        .trim();
       const mode = detectMode(userInput);
-      addAgentMessage(text, mode);
+      addAgentMessage(cleanText || text, mode);
     }
 
     // Friction delivery
