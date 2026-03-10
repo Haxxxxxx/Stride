@@ -392,7 +392,7 @@ export default function AIAgent() {
       try {
         const programs = await queryCollection<Program & { id: string; active: boolean }>(
           `users/${user.uid}/programs`,
-          [where("active", "==", true)]
+          [where("active", "==", true), limit(1)]
         );
         if (programs[0]) {
           program = programs[0];
@@ -767,7 +767,7 @@ export default function AIAgent() {
       if (user) {
         const programs = await queryCollection<Program & { id: string; active: boolean }>(
           `users/${user.uid}/programs`,
-          [where("active", "==", true)]
+          [where("active", "==", true), limit(1)]
         );
         if (programs[0]) {
           updatedProgram = programs[0];
