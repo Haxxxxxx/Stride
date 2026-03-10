@@ -3,7 +3,7 @@ import svgPaths from "../../imports/svg-2gts8wf65t";
 import { CircularProgress } from "./CircularProgress";
 import { useState, useEffect } from "react";
 import { useAuth } from "../contexts/AuthContext";
-import { queryCollection, orderBy, limit } from "../../services/firestore";
+import { subscribeToCollection, orderBy, limit } from "../../services/firestore";
 import { getBehaviorState } from "../utils/behaviorStore";
 
 interface WorkoutLog {
@@ -346,10 +346,12 @@ export default function Progress() {
 
   useEffect(() => {
     if (!user) return;
-    queryCollection<WorkoutLog>(
+    const unsub = subscribeToCollection<WorkoutLog>(
       `users/${user.uid}/workoutLogs`,
-      [orderBy("completedAt", "desc"), limit(50)]
-    ).then(setLogs).catch(console.warn);
+      [orderBy("completedAt", "desc"), limit(50)],
+      setLogs
+    );
+    return unsub;
   }, [user]);
 
   const recentLogs = logs.slice(0, 5);

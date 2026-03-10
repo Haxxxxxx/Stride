@@ -8,7 +8,7 @@ import { SystemMessage } from "./SystemMessage";
 import { getRandomMessage, getStreakMilestoneMessage } from "../utils/microLanguage";
 import { getBehaviorState, recordLogin } from "../utils/behaviorStore";
 import { useAuth } from "../contexts/AuthContext";
-import { subscribeToDocument, queryCollection, where, orderBy, limit } from "../../services/firestore";
+import { subscribeToDocument, subscribeToCollection, queryCollection, where, orderBy, limit } from "../../services/firestore";
 import type { Program, WorkoutDay } from "../../services/programGenerator";
 
 interface DashboardWorkoutLog {
@@ -360,7 +360,7 @@ export default function Dashboard() {
     ).then((docs) => setUnreadCount(docs.length)).catch(console.warn);
   }, [user]);
 
-  // Load this week's workout logs for week overview
+  // Live-subscribe to this week's workout logs for week overview
   useEffect(() => {
     if (!user) return;
     const now = new Date();
@@ -370,30 +370,34 @@ export default function Dashboard() {
     monday.setHours(0, 0, 0, 0);
     const mondayStr = monday.toISOString().split("T")[0];
 
-    queryCollection<DashboardWorkoutLog>(
+    const unsub = subscribeToCollection<DashboardWorkoutLog>(
       `users/${user.uid}/workoutLogs`,
-      [where("completedAt", ">=", mondayStr), orderBy("completedAt", "asc")]
-    ).then((logs) => {
-      const map = new Map<string, DashboardWorkoutLog>();
-      for (const log of logs) {
-        const dateKey = new Date(log.completedAt).toISOString().split("T")[0];
-        if (!map.has(dateKey)) map.set(dateKey, log);
+      [where("completedAt", ">=", mondayStr), orderBy("completedAt", "asc")],
+      (logs) => {
+        const map = new Map<string, DashboardWorkoutLog>();
+        for (const log of logs) {
+          const dateKey = new Date(log.completedAt).toISOString().split("T")[0];
+          if (!map.has(dateKey)) map.set(dateKey, log);
+        }
+        setWeekLogs(map);
       }
-      setWeekLogs(map);
-    }).catch(console.warn);
+    );
+    return unsub;
   }, [user]);
 
-  // Load active program
+  // Live-subscribe to active program
   useEffect(() => {
     if (!user) return;
-    queryCollection<Program & { id: string }>(
+    const unsub = subscribeToCollection<Program & { id: string }>(
       `users/${user.uid}/programs`,
-      [where("active", "==", true), limit(1)]
-    ).then((programs) => {
-      if (programs.length > 0) {
-        setActiveProgram(programs[0]);
+      [where("active", "==", true), limit(1)],
+      (programs) => {
+        if (programs.length > 0) {
+          setActiveProgram(programs[0]);
+        }
       }
-    }).catch(console.warn);
+    );
+    return unsub;
   }, [user]);
 
   useEffect(() => {

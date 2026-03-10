@@ -99,6 +99,18 @@ export function subscribeToDocument<T = DocumentData>(
   });
 }
 
+// Real-time collection listener
+export function subscribeToCollection<T = DocumentData>(
+  path: string,
+  constraints: QueryConstraint[],
+  callback: (data: T[]) => void
+): Unsubscribe {
+  const q = query(collection(db, path), ...constraints);
+  return onSnapshot(q, (snap) => {
+    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }) as T));
+  });
+}
+
 // Ensure a user doc exists with sensible defaults — only creates if doc is missing.
 // Uses a server read to avoid race with Cloud Functions that may have just created the doc.
 export async function ensureUserDoc(uid: string, extra?: Record<string, unknown>): Promise<void> {
