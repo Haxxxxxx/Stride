@@ -142,8 +142,12 @@ const agentTools: FunctionDeclaration[] = [
 
 const TOOL_KEYWORDS = /\b(program|protocol|schedule|exercise|swap|replace|change|adjust|volume|sets|reps|rest|skip|regenerate|edit|modify|show|week|day|workout|routine|training|plan|session|customize|update|redo|switch|remove|add|today|tomorrow|next|deload|recovery|lighter|easier|progress|performance|pr|weight|trend|history)\b/i;
 
+// Phrases that sound like tool keywords but are conversational — no tools needed
+const NON_TOOL_PATTERNS = /\b(report(ing)?\s+(completion|done)|finished\s+(my\s+)?workout|completed\s+(today|my)|done\s+(for\s+today|training|with\s+my)|how\s+am\s+i\s+doing|give\s+me\s+feedback|good\s+(morning|evening)|hello|hey|hi|thanks|thank\s+you)\b/i;
+
 /** Check if a user message likely needs tool access */
 export function needsTools(message: string): boolean {
+  if (NON_TOOL_PATTERNS.test(message)) return false;
   return TOOL_KEYWORDS.test(message);
 }
 
