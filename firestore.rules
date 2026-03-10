@@ -85,6 +85,12 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // --- Public platform stats: readable by anyone (landing page), admin write only ---
+    match /platformStats/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     // --- Beta codes: can read specific code (get), only mark as used if not already used ---
     match /betaCodes/{code} {
       allow get: if request.auth != null;

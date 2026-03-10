@@ -1,4 +1,5 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
+import { onDocumentWritten } from "firebase-functions/v2/firestore";
 import { defineSecret } from "firebase-functions/params";
 import * as admin from "firebase-admin";
 import * as nacl from "tweetnacl";
@@ -294,4 +295,81 @@ If you didn't request access, ignore this message.`;
     return { success: true };
   }
 );
+
+// ============================================================
+// Platform Stats Aggregation
+// ============================================================
+
+/**
+ * Aggregate real platform stats from Firestore collections.
+ * Writes to platformStats/current — publicly readable for the landing page.
+ */
+async function aggregateStats(): Promise<void> {
+  const firestore = admin.firestore();
+
+  // Count active operators (users with onboardingComplete)
+  const usersSnap = await firestore.collection("users").get();
+  const activeOperators = usersSnap.docs.filter(
+    (d) => d.data().onboardingComplete === true
+  ).length;
+  const totalOperators = usersSnap.size;
+
+  // Count total workout logs across all users
+  let totalWorkoutLogs = 0;
+  let completedWorkouts = 0;
+  for (const userDoc of usersSnap.docs) {
+    const logsSnap = await firestore
+      .collection(`users/${userDoc.id}/workoutLogs`)
+      .get();
+    totalWorkoutLogs += logsSnap.size;
+    completedWorkouts += logsSnap.docs.filter(
+      (d) => d.data().completionType === "completed"
+    ).length;
+  }
+
+  // Avg success rate (completed / total logged, default 0)
+  const avgSuccessRate =
+    totalWorkoutLogs > 0
+      ? Math.round((completedWorkouts / totalWorkoutLogs) * 100)
+      : 0;
+
+  // Count active squads
+  const squadsSnap = await firestore.collection("squads").get();
+  const activeSquads = squadsSnap.size;
+
+  // Count active challenges
+  const challengesSnap = await firestore.collection("challenges").get();
+  const activeChallenges = challengesSnap.size;
+
+  // Count total programs generated
+  let totalPrograms = 0;
+  for (const userDoc of usersSnap.docs) {
+    const programsSnap = await firestore
+      .collection(`users/${userDoc.id}/programs`)
+      .get();
+    totalPrograms += programsSnap.size;
+  }
+
+  await firestore.doc("platformStats/current").set({
+    activeOperators,
+    totalOperators,
+    totalWorkoutLogs,
+    avgSuccessRate,
+    activeSquads,
+    activeChallenges,
+    totalPrograms,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+}
+
+/** Firestore trigger: refresh stats when any user doc changes */
+export const onUserChange = onDocumentWritten("users/{uid}", async () => {
+  await aggregateStats();
+});
+
+/** Callable: manually trigger stats refresh */
+export const triggerStatsRefresh = onCall(async () => {
+  await aggregateStats();
+  return { success: true };
+});
 
