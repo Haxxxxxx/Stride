@@ -3,6 +3,7 @@ import { getAuth } from "firebase/auth";
 import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from "firebase/firestore";
 import { getFunctions } from "firebase/functions";
 import { getStorage } from "firebase/storage";
+import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "firebase/app-check";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -21,3 +22,13 @@ export const db = initializeFirestore(app, {
 });
 export const storage = getStorage(app);
 export const functions = getFunctions(app);
+
+// App Check — prevents unauthorized API abuse (Gemini billing safety)
+// Requires: VITE_RECAPTCHA_SITE_KEY env var + reCAPTCHA Enterprise enabled in Firebase Console
+const recaptchaKey = import.meta.env.VITE_RECAPTCHA_SITE_KEY;
+if (recaptchaKey) {
+  initializeAppCheck(app, {
+    provider: new ReCaptchaEnterpriseProvider(recaptchaKey),
+    isTokenAutoRefreshEnabled: true,
+  });
+}
