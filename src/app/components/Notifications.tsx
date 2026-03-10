@@ -4,7 +4,7 @@ import { useAuth } from "../contexts/AuthContext";
 import {
   queryCollection,
   updateDocument,
-  deleteDocument,
+  batchWrite,
   orderBy,
 } from "../../services/firestore";
 
@@ -92,10 +92,13 @@ export default function Notifications() {
   const handleMarkAllRead = async () => {
     if (!user) return;
     const unread = notifications.filter((n) => !n.read);
-    await Promise.all(
-      unread.map((n) =>
-        updateDocument(`users/${user.uid}/notifications/${n.id}`, { read: true })
-      )
+    if (unread.length === 0) return;
+    await batchWrite(
+      unread.map((n) => ({
+        type: "update" as const,
+        path: `users/${user.uid}/notifications/${n.id}`,
+        data: { read: true },
+      }))
     );
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
   };
@@ -104,10 +107,12 @@ export default function Notifications() {
   const handleClearRead = async () => {
     if (!user) return;
     const readNotifs = notifications.filter((n) => n.read);
-    await Promise.all(
-      readNotifs.map((n) =>
-        deleteDocument(`users/${user.uid}/notifications/${n.id}`)
-      )
+    if (readNotifs.length === 0) return;
+    await batchWrite(
+      readNotifs.map((n) => ({
+        type: "delete" as const,
+        path: `users/${user.uid}/notifications/${n.id}`,
+      }))
     );
     setNotifications((prev) => prev.filter((n) => !n.read));
   };
