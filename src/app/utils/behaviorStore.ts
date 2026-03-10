@@ -34,6 +34,10 @@ export interface BehaviorState {
   resetEvents14d: number;
   resetEvents30d: number;
 
+  // Window timestamps for rolling counters (epoch ms)
+  windowStart14d: number;
+  windowStart30d: number;
+
   // Session data
   sessionDurationPlanned: number;
   sessionDurationActual: number;
@@ -80,6 +84,11 @@ export interface BehaviorState {
 
   // Weekly reset tracking
   lastWeeklyReset: number;
+
+  // Deload tracking
+  weeksSinceLastDeload: number;
+  lastDeloadTimestamp: number;
+  deloadRecommended: boolean;
 }
 
 const DEFAULT_STATE: BehaviorState = {
@@ -99,6 +108,8 @@ const DEFAULT_STATE: BehaviorState = {
   delayLanguageCount7d: 0,
   resetEvents14d: 0,
   resetEvents30d: 0,
+  windowStart14d: 0,
+  windowStart30d: 0,
   sessionDurationPlanned: 30,
   sessionDurationActual: 0,
   chatIntentTags: [],
@@ -124,6 +135,9 @@ const DEFAULT_STATE: BehaviorState = {
   alignmentScore: 50,
   lastAlignmentCalculation: 0,
   lastWeeklyReset: 0,
+  weeksSinceLastDeload: 0,
+  lastDeloadTimestamp: 0,
+  deloadRecommended: false,
 };
 
 const STORE_KEY = "stride_behavior_state";
@@ -159,11 +173,37 @@ export function getBehaviorState(): BehaviorState {
   const currentWeek = getWeekNumber(Date.now());
   const lastResetWeek = getWeekNumber(state.lastWeeklyReset || 0);
   if (currentWeek > lastResetWeek) {
+    // Increment deload counter if operator trained this week
+    if (state.workoutsCompletedThisWeek > 0) {
+      state.weeksSinceLastDeload = (state.weeksSinceLastDeload || 0) + 1;
+      state.deloadRecommended = state.weeksSinceLastDeload >= 3;
+    }
     state.workoutsCompletedThisWeek = 0;
     state.workoutsSkippedThisWeek = 0;
     state.hesitationEvents7d = 0;
     state.delayLanguageCount7d = 0;
     state.lastWeeklyReset = Date.now();
+    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  }
+
+  // Roll off 14d/30d counters when their window expires
+  const now = Date.now();
+  const MS_14D = 14 * 24 * 60 * 60 * 1000;
+  const MS_30D = 30 * 24 * 60 * 60 * 1000;
+  let rolled = false;
+  if (state.windowStart14d && now - state.windowStart14d > MS_14D) {
+    state.workoutsCompleted14d = 0;
+    state.workoutsSkipped14d = 0;
+    state.resetEvents14d = 0;
+    state.windowStart14d = now;
+    rolled = true;
+  }
+  if (state.windowStart30d && now - state.windowStart30d > MS_30D) {
+    state.resetEvents30d = 0;
+    state.windowStart30d = now;
+    rolled = true;
+  }
+  if (rolled) {
     localStorage.setItem(STORE_KEY, JSON.stringify(state));
   }
 
@@ -259,6 +299,7 @@ export function recordWorkoutCompleted(): BehaviorState {
     streakDays: newStreak,
     previousStreakDays: state.streakDays,
     consecutiveMissedSessions: 0,
+    windowStart14d: state.windowStart14d || Date.now(),
   });
 }
 
@@ -276,6 +317,8 @@ export function recordResetEvent(): BehaviorState {
     resetEvents14d: state.resetEvents14d + 1,
     resetEvents30d: state.resetEvents30d + 1,
     chatIntentTags: [...state.chatIntentTags, "reset"].slice(-100),
+    windowStart14d: state.windowStart14d || Date.now(),
+    windowStart30d: state.windowStart30d || Date.now(),
   });
 }
 
@@ -303,6 +346,14 @@ export function recordAgentInteraction(): BehaviorState {
   return updateBehaviorState({
     totalAgentInteractions: state.totalAgentInteractions + 1,
     consecutiveFrictionCount: 0, // reset consecutive after non-friction
+  });
+}
+
+export function recordDeloadComplete(): BehaviorState {
+  return updateBehaviorState({
+    weeksSinceLastDeload: 0,
+    lastDeloadTimestamp: Date.now(),
+    deloadRecommended: false,
   });
 }
 
