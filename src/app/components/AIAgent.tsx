@@ -6,9 +6,9 @@ import { shouldDeliverFriction } from "../utils/frictionEngine";
 import { recordAgentInteraction, recordDelayLanguage, recordResetEvent, getBehaviorState, calculateAlignmentScore } from "../utils/behaviorStore";
 import { buildSystemPrompt, getAgentWelcome, type AgentId, type AgentContext } from "../../services/agentPrompts";
 import { useAuth } from "../contexts/AuthContext";
-import { getDocument, updateDocument, queryCollection, where } from "../../services/firestore";
+import { getDocument, setDocument, updateDocument, queryCollection, where, orderBy, limit } from "../../services/firestore";
 import { detectMode } from "../utils/agentLayer";
-import { createAgentModel, startAgentChat, type ChatSession, type GenerativeModel, type LLMMessage } from "../../services/gemini";
+import { createAgentModel, createChatModel, startAgentChat, needsTools, type ChatSession } from "../../services/gemini";
 import { executeAction, type ActionProposal } from "../../services/agentActions";
 import type { Program } from "../../services/programGenerator";
 import type { EnhancedGenerateContentResponse } from "firebase/ai";
@@ -48,6 +48,8 @@ interface Message {
       reps: number | string;
       rest: string;
       changed?: boolean;
+      replacing?: boolean;
+      dayLabel?: string;
     }>;
   };
   programData?: {
@@ -105,6 +107,121 @@ function EmptyCircle() {
   );
 }
 
+// ============================================================
+// Chat History Persistence (localStorage + Firestore backup)
+// ============================================================
+
+const CHAT_STORAGE_KEY = "stride_chat_history";
+const MAX_PERSISTED_MESSAGES = 50;
+const MAX_IN_MEMORY_MESSAGES = 60; // Cap in-memory messages to prevent unbounded growth
+const MAX_GEMINI_HISTORY = 10; // Last N user+ai turns to pass as Gemini conversation history
+const FIRESTORE_SAVE_DEBOUNCE = 15000; // Debounce Firestore writes (15s reduces cost ~70%)
+
+let firestoreSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Load chat history from localStorage (fast, synchronous) */
+function loadChatHistoryLocal(): Message[] | null {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { messages: Message[]; agent: string; savedAt: number };
+    // Discard if older than 24h
+    if (Date.now() - parsed.savedAt > 24 * 60 * 60 * 1000) {
+      localStorage.removeItem(CHAT_STORAGE_KEY);
+      return null;
+    }
+    return parsed.messages;
+  } catch {
+    return null;
+  }
+}
+
+/** Load chat history from Firestore (cross-device, async) */
+async function loadChatHistoryFirestore(uid: string): Promise<{ messages: Message[]; agent: string; savedAt: number } | null> {
+  try {
+    const doc = await getDocument<{ messages: Message[]; agent: string; savedAt: number }>(
+      `users/${uid}/chatHistory/latest`
+    );
+    if (!doc || !doc.messages?.length) return null;
+    // Discard if older than 24h
+    if (Date.now() - doc.savedAt > 24 * 60 * 60 * 1000) return null;
+    return doc;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve best chat history: pick the most recent between localStorage and Firestore */
+async function loadChatHistory(uid?: string): Promise<Message[] | null> {
+  const local = loadChatHistoryLocal();
+  if (!uid) return local;
+
+  const remote = await loadChatHistoryFirestore(uid);
+  if (!local && !remote) return null;
+  if (!remote) return local;
+  if (!local) return remote.messages;
+
+  // Both exist — pick the one with the most recent savedAt
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    const localSavedAt = raw ? (JSON.parse(raw) as { savedAt: number }).savedAt : 0;
+    return remote.savedAt > localSavedAt ? remote.messages : local;
+  } catch {
+    return local;
+  }
+}
+
+/** Build Gemini-compatible conversation history from recent messages */
+function buildGeminiHistory(messages: Message[]): { role: "user" | "model"; parts: [{ text: string }] }[] {
+  const history: { role: "user" | "model"; parts: [{ text: string }] }[] = [];
+  // Only take the last MAX_GEMINI_HISTORY pairs of user+ai messages
+  const relevant = messages
+    .filter(m => m.type === "user" || m.type === "ai" || m.type === "pattern")
+    .slice(-(MAX_GEMINI_HISTORY * 2));
+
+  for (const msg of relevant) {
+    const role = msg.type === "user" ? "user" as const : "model" as const;
+    // Avoid consecutive same-role entries (Gemini requirement)
+    if (history.length > 0 && history[history.length - 1].role === role) {
+      history[history.length - 1].parts[0].text += "\n" + msg.text;
+    } else {
+      history.push({ role, parts: [{ text: msg.text }] });
+    }
+  }
+
+  // Gemini requires history to start with "user" role
+  while (history.length > 0 && history[0].role !== "user") {
+    history.shift();
+  }
+  // Gemini requires history to end with "model" role
+  while (history.length > 0 && history[history.length - 1].role !== "model") {
+    history.pop();
+  }
+
+  return history;
+}
+
+function saveChatHistory(messages: Message[], agent: string, uid?: string) {
+  // Only persist text-based messages, skip proposals (non-serializable execute fn)
+  const toSave = messages
+    .filter(m => m.type !== "proposal")
+    .slice(-MAX_PERSISTED_MESSAGES);
+  const payload = { messages: toSave, agent, savedAt: Date.now() };
+
+  // localStorage — immediate (fast cache)
+  try {
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(payload));
+  } catch { /* quota exceeded — ignore */ }
+
+  // Firestore — debounced (cross-device backup)
+  if (uid) {
+    if (firestoreSaveTimer) clearTimeout(firestoreSaveTimer);
+    firestoreSaveTimer = setTimeout(() => {
+      setDocument(`users/${uid}/chatHistory/latest`, payload).catch(() => {});
+    }, FIRESTORE_SAVE_DEBOUNCE);
+  }
+}
+
 export default function AIAgent() {
   const { user } = useAuth();
   const [input, setInput] = useState("");
@@ -113,25 +230,22 @@ export default function AIAgent() {
   const [showAgentModal, setShowAgentModal] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<Agent>(currentAgent);
   const [userProfile, setUserProfile] = useState<AgentContext["userProfile"]>(null);
-  const [conversationHistory, setConversationHistory] = useState<LLMMessage[]>([]);
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      type: "system",
-      text: "COMMAND CHANNEL ESTABLISHED",
-      timestamp: "09:41"
-    },
-    {
-      type: "ai",
-      text: "Initializing agent...",
-      timestamp: "09:41"
-    }
-  ]);
+  const [messages, setMessages] = useState<Message[]>(() => {
+    // Fast restore from localStorage on mount (Firestore checked async in useEffect)
+    const saved = loadChatHistoryLocal();
+    if (saved && saved.length > 0) return saved;
+    return [
+      { type: "system", text: "COMMAND CHANNEL ESTABLISHED", timestamp: "09:41" },
+      { type: "ai", text: "Initializing agent...", timestamp: "09:41" },
+    ];
+  });
 
-  // Gemini state
-  const [geminiModel, setGeminiModel] = useState<GenerativeModel | null>(null);
+  // Gemini state — two-tier: chatSession (no tools, cheap) + toolSession (with tools, for program actions)
   const [chatSession, setChatSession] = useState<ChatSession | null>(null);
+  const [toolSession, setToolSession] = useState<ChatSession | null>(null);
   const [pendingProposal, setPendingProposal] = useState<ActionProposal | null>(null);
   const [activeProgram, setActiveProgram] = useState<(Program & { id: string }) | null>(null);
+  const lastSendRef = useRef(0); // rate limiting
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -145,15 +259,45 @@ export default function AIAgent() {
     scrollToBottom();
   }, [messages]);
 
+  // Persist chat history + cap in-memory messages
+  useEffect(() => {
+    if (messages.length > 2) {
+      saveChatHistory(messages, currentAgent, user?.uid);
+    }
+    // Window: keep only last MAX_IN_MEMORY_MESSAGES to prevent unbounded growth
+    if (messages.length > MAX_IN_MEMORY_MESSAGES) {
+      setMessages(prev => prev.slice(-MAX_IN_MEMORY_MESSAGES));
+    }
+  }, [messages, currentAgent]);
+
+  // Flush pending Firestore save immediately on unmount (captures last message before close)
+  useEffect(() => {
+    return () => {
+      if (firestoreSaveTimer && user?.uid) {
+        clearTimeout(firestoreSaveTimer);
+        firestoreSaveTimer = null;
+        const toSave = messages.filter(m => m.type !== "proposal").slice(-MAX_PERSISTED_MESSAGES);
+        if (toSave.length > 2) {
+          setDocument(`users/${user.uid}/chatHistory/latest`, {
+            messages: toSave, agent: currentAgent, savedAt: Date.now()
+          }).catch(() => {});
+        }
+      }
+    };
+  }, [user?.uid, messages, currentAgent]);
+
   const getTimestamp = () => {
     return new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   };
 
-  // Build context and initialize Gemini model
+  // Build context and initialize both Gemini sessions (chat + tools)
   const initializeGemini = useCallback((
     agent: Agent,
     profile: AgentContext["userProfile"],
     program: (Program & { id: string }) | null,
+    recentWorkouts?: AgentContext["recentWorkouts"],
+    recentModifications?: AgentContext["recentModifications"],
+    currentMessages?: Message[],
   ) => {
     try {
       const behaviorState = getBehaviorState();
@@ -165,18 +309,31 @@ export default function AIAgent() {
           currentWeek: program.weeks[0]?.weekNumber ?? 1,
           currentDay: program.weeks[0]?.days[0]?.name ?? "Day 1",
           totalWeeks: program.weeks.length,
+          weekType: (program.weeks[0] as { weekType?: string })?.weekType,
         } : null,
+        recentWorkouts,
+        recentModifications,
       };
       const systemPrompt = buildSystemPrompt(agent as AgentId, context);
-      const model = createAgentModel(systemPrompt);
-      const session = startAgentChat(model);
-      setGeminiModel(model);
-      setChatSession(session);
-      return session;
+
+      // Build conversation history from existing messages for continuity
+      const geminiHistory = currentMessages ? buildGeminiHistory(currentMessages) : undefined;
+
+      // Chat session: no tools, ~400-500 tokens cheaper per message
+      const chatModel = createChatModel(systemPrompt);
+      const chat = startAgentChat(chatModel, geminiHistory);
+      setChatSession(chat);
+
+      // Tool session: with function calling, for program actions
+      const toolModel = createAgentModel(systemPrompt);
+      const tools = startAgentChat(toolModel, geminiHistory);
+      setToolSession(tools);
+
+      return { chat, tools };
     } catch (err) {
       console.warn("[AIAgent] Gemini init failed:", err);
-      setGeminiModel(null);
       setChatSession(null);
+      setToolSession(null);
       return null;
     }
   }, []);
@@ -196,13 +353,29 @@ export default function AIAgent() {
       try {
         const data = await getDocument<Record<string, unknown>>(`users/${user.uid}/personalization/data`);
         if (data) {
+          // Format height/weight as compact strings (e.g. "180cm", "75kg")
+          const fmtMeasure = (m: unknown): string | undefined => {
+            const measure = m as { value?: string; unit?: string } | undefined;
+            return measure?.value ? `${measure.value}${measure.unit || ""}` : undefined;
+          };
+          const equipRaw = data.equipmentAccess;
+          const equipStr = Array.isArray(equipRaw) ? equipRaw.join(",") : (equipRaw as string);
+          const sportRaw = data.sportFocus;
+          const sportArr = Array.isArray(sportRaw) ? sportRaw as string[] : sportRaw ? [sportRaw as string] : undefined;
+
           profile = {
             optimizationGoal: data.optimizationGoal as string,
             experience: data.experience as string,
             constraints: data.constraints as string[],
             sessionTime: data.sessionTime as string,
             trainingFocuses: data.trainingFocuses as string[],
-            equipmentAccess: data.equipmentAccess as string,
+            equipmentAccess: equipStr,
+            bodyProfile: data.bodyProfile as string,
+            sportFocus: sportArr,
+            height: fmtMeasure(data.height),
+            weight: fmtMeasure(data.weight),
+            goalWeight: fmtMeasure(data.goalWeight),
+            gymAccess: data.gymAccess as string,
           };
           setUserProfile(profile);
           if (data.selectedAgent) {
@@ -229,14 +402,84 @@ export default function AIAgent() {
         console.warn("Failed to load active program:", err);
       }
 
-      // Initialize Gemini with full context
-      initializeGemini(agent, profile, program);
+      // Load recent workout logs (last 5) with performance data for coaching intelligence
+      let recentWorkouts: AgentContext["recentWorkouts"] = [];
+      try {
+        const logs = await queryCollection<{
+          workoutName: string;
+          exercises: { name: string; actualSets?: { weight: number; repsCompleted: number; rpe: number; setNumber: number }[] }[];
+          completedAt: string;
+          completionType: string;
+          readiness?: { sleepQuality: number; energyLevel: number; painReported: boolean };
+        }>(
+          `users/${user.uid}/workoutLogs`,
+          [orderBy("completedAt", "desc"), limit(5)]
+        );
+        recentWorkouts = logs.map(l => {
+          // Extract per-exercise performance summaries
+          const performance = l.exercises
+            ?.filter(e => e.actualSets && e.actualSets.length > 0)
+            .map(e => {
+              const sets = e.actualSets!;
+              const avgWeight = Math.round(sets.reduce((s, d) => s + d.weight, 0) / sets.length);
+              const avgRPE = Math.round(sets.reduce((s, d) => s + d.rpe, 0) / sets.length * 10) / 10;
+              return { exercise: e.name, avgWeight, avgRPE, totalSets: sets.length };
+            });
 
-      // Set welcome messages
-      setMessages([
-        { type: "system", text: "COMMAND CHANNEL ESTABLISHED", timestamp: getTimestamp() },
-        { type: "ai", text: getAgentWelcome(agent), timestamp: getTimestamp() },
-      ]);
+          return {
+            date: new Date(l.completedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+            name: l.workoutName || "Workout",
+            exercises: l.exercises?.map(e => e.name) || [],
+            completionType: l.completionType || "full",
+            performance: performance?.length ? performance : undefined,
+            readiness: l.readiness ? {
+              sleep: l.readiness.sleepQuality,
+              energy: l.readiness.energyLevel,
+              pain: l.readiness.painReported,
+            } : undefined,
+          };
+        });
+      } catch (err) {
+        console.warn("Failed to load workout logs:", err);
+      }
+
+      // Load recent program modifications (last 5)
+      let recentModifications: AgentContext["recentModifications"] = [];
+      try {
+        const mods = await queryCollection<{
+          action: string;
+          description: string;
+          timestamp: string;
+        }>(
+          `users/${user.uid}/programModifications`,
+          [orderBy("timestamp", "desc"), limit(5)]
+        );
+        recentModifications = mods.map(m => ({
+          date: new Date(m.timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+          action: m.action,
+          description: m.description,
+        }));
+      } catch (err) {
+        console.warn("Failed to load modification history:", err);
+      }
+
+      // Initialize Gemini with full context + conversation history (Firestore > localStorage)
+      const savedHistory = await loadChatHistory(user.uid);
+      initializeGemini(agent, profile, program, recentWorkouts, recentModifications, savedHistory || undefined);
+
+      // If Firestore had newer history, update in-memory messages
+      const localHistory = loadChatHistoryLocal();
+      if (savedHistory && savedHistory !== localHistory && savedHistory.length > 0) {
+        setMessages(savedHistory);
+      }
+
+      // Only set welcome messages if no history was restored
+      if (!savedHistory || savedHistory.length === 0) {
+        setMessages([
+          { type: "system", text: "COMMAND CHANNEL ESTABLISHED", timestamp: getTimestamp() },
+          { type: "ai", text: getAgentWelcome(agent), timestamp: getTimestamp() },
+        ]);
+      }
     };
 
     loadData();
@@ -244,6 +487,11 @@ export default function AIAgent() {
 
   const handleSend = async () => {
     if (!input.trim() || isThinking) return;
+
+    // Rate limit: 2 seconds between messages
+    const now = Date.now();
+    if (now - lastSendRef.current < 2000) return;
+    lastSendRef.current = now;
 
     const userMessage: Message = {
       type: "user",
@@ -265,86 +513,178 @@ export default function AIAgent() {
       await handleGeminiSend(userInput);
     } catch (geminiErr) {
       console.warn("[AIAgent] Gemini failed, using template fallback:", geminiErr);
+      const errMsg = (geminiErr as { message?: string }).message || "";
+      // If rate limited, tell the user instead of giving random motivational text
+      if (errMsg.includes("429") || errMsg.includes("quota")) {
+        setMessages(prev => [...prev, {
+          type: "system",
+          text: "NEURAL LINK THROTTLED — high traffic. Retry in 30s.",
+          timestamp: getTimestamp(),
+        }]);
+      }
       handleTemplateFallback(userInput);
     } finally {
       setIsThinking(false);
     }
   };
 
-  /** Primary: Gemini via Firebase AI Logic with function calling */
-  const handleGeminiSend = async (userInput: string) => {
-    let session = chatSession;
+  /** Send a message with 30s timeout and one retry on 429 rate limit */
+  const sendWithRetry = async (session: ChatSession, message: string | Parameters<ChatSession["sendMessage"]>[0]) => {
+    const withTimeout = (promise: Promise<unknown>) =>
+      Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Request timeout — neural link lost.")), 30000)),
+      ]);
+    try {
+      return await withTimeout(session.sendMessage(message)) as Awaited<ReturnType<ChatSession["sendMessage"]>>;
+    } catch (err: unknown) {
+      const msg = (err as { message?: string }).message || "";
+      // Retry once on 429 after the suggested delay (or 5s default)
+      if (msg.includes("429")) {
+        const delayMatch = msg.match(/retry in ([\d.]+)s/i);
+        const delaySec = delayMatch ? Math.min(parseFloat(delayMatch[1]), 10) : 5;
+        await new Promise((r) => setTimeout(r, delaySec * 1000));
+        return await withTimeout(session.sendMessage(message)) as Awaited<ReturnType<ChatSession["sendMessage"]>>;
+      }
+      throw err;
+    }
+  };
 
-    // Reinitialize if no session
+  /** Handle a single function call result — may trigger chained calls */
+  const handleFunctionCall = async (
+    session: ChatSession,
+    fc: { name: string; args: unknown },
+    depth: number,
+  ): Promise<void> => {
+    const args = (fc.args as Record<string, unknown>) ?? {};
+    const actionResult = await executeAction(fc.name, args, user!.uid);
+
+    if (actionResult.type === "data") {
+      // Read action — send result back to Gemini for summary (may trigger another tool call)
+      const followUp = await sendWithRetry(session, [{
+        functionResponse: {
+          name: fc.name,
+          response: actionResult.data,
+        },
+      }]);
+
+      // Check if Gemini wants to chain another function call (e.g., getActiveProgram → swapExercise)
+      const chainedCalls = followUp.response.functionCalls();
+      if (chainedCalls && chainedCalls.length > 0) {
+        // Show intermediate text if any
+        const intermediateText = safeText(followUp.response);
+        if (intermediateText) addAgentMessage(intermediateText);
+
+        if (depth < 3) {
+          await handleFunctionCall(session, chainedCalls[0], depth + 1);
+          return;
+        }
+        // Chain limit reached — let Gemini's text response through
+      }
+
+      const text = safeText(followUp.response) || "Here's your current protocol data.";
+
+      // For getActiveProgram, attach structured program data to the message
+      const normalizedName = fc.name.replace(/_([a-z])/g, (_: string, c: string) => c.toUpperCase());
+      if (normalizedName === "getActiveProgram" && actionResult.data.found && actionResult.data.weeks) {
+        const msg: Message = {
+          type: "ai",
+          text,
+          timestamp: getTimestamp(),
+          programData: {
+            name: actionResult.data.name as string,
+            weeks: actionResult.data.weeks as ProgramWeekData[],
+          },
+        };
+        setMessages(prev => [...prev, msg]);
+      } else {
+        addAgentMessage(text);
+      }
+    } else {
+      // Write action — show proposal for user confirmation
+      const proposal = actionResult.proposal;
+      setPendingProposal(proposal);
+
+      const proposalMsg: Message = {
+        type: "proposal",
+        text: proposal.description,
+        timestamp: getTimestamp(),
+        planData: {
+          exercises: proposal.preview.exercises.map(e => ({
+            name: e.name,
+            sets: e.sets,
+            reps: e.reps,
+            rest: e.rest,
+            changed: e.changed,
+            replacing: e.replacing,
+            dayLabel: e.dayLabel,
+          })),
+        },
+        proposalId: `proposal-${Date.now()}`,
+      };
+      setMessages(prev => [...prev, proposalMsg]);
+    }
+  };
+
+  // Track whether we're mid-conversation about program modifications
+  const toolConversationRef = useRef(false);
+
+  /** Primary: Gemini via Firebase AI Logic — routes to chat or tool session */
+  const handleGeminiSend = async (userInput: string) => {
+    // Use tool session if: keyword match, OR we're mid-tool-conversation (follow-up like "back and arms")
+    const useTools = needsTools(userInput) || toolConversationRef.current;
+
+    // Pick the right session
+    let session = useTools ? toolSession : chatSession;
+
+    // Reinitialize if no session (pass current messages for history continuity)
     if (!session) {
-      session = initializeGemini(currentAgent, userProfile, activeProgram);
-      if (!session) throw new Error("Gemini init failed");
+      const sessions = initializeGemini(currentAgent, userProfile, activeProgram, undefined, undefined, messages);
+      if (!sessions) throw new Error("Gemini init failed");
+      session = useTools ? sessions.tools : sessions.chat;
     }
 
-    const result = await session.sendMessage(userInput);
+    const result = await sendWithRetry(session, userInput);
     const response = result.response;
     const functionCalls = response.functionCalls();
 
     if (functionCalls && functionCalls.length > 0) {
-      // Handle function call
-      const fc = functionCalls[0];
-      const args = (fc.args as Record<string, unknown>) ?? {};
-
-      const actionResult = await executeAction(fc.name, args, user!.uid);
-
-      if (actionResult.type === "data") {
-        // Read action — send result back to Gemini for summary
-        const followUp = await session.sendMessage([{
-          functionResponse: {
-            name: fc.name,
-            response: actionResult.data,
-          },
-        }]);
-
-        const text = safeText(followUp.response) || "Here's your current protocol data.";
-
-        // For getActiveProgram, attach structured program data to the message
-        if (fc.name === "getActiveProgram" && actionResult.data.found && actionResult.data.weeks) {
-          const msg: Message = {
-            type: "ai",
-            text,
-            timestamp: getTimestamp(),
-            programData: {
-              name: actionResult.data.name as string,
-              weeks: actionResult.data.weeks as ProgramWeekData[],
-            },
-          };
-          setMessages(prev => [...prev, msg]);
-        } else {
-          addAgentMessage(text);
-        }
-      } else {
-        // Write action — show proposal for user confirmation
-        const proposal = actionResult.proposal;
-        setPendingProposal(proposal);
-
-        // Add proposal message with exercise preview
-        const proposalMsg: Message = {
-          type: "proposal",
-          text: proposal.description,
-          timestamp: getTimestamp(),
-          planData: {
-            exercises: proposal.preview.exercises.map(e => ({
-              name: e.name,
-              sets: e.sets,
-              reps: e.reps,
-              rest: e.rest,
-              changed: e.changed,
-            })),
-          },
-          proposalId: `proposal-${Date.now()}`,
-        };
-        setMessages(prev => [...prev, proposalMsg]);
-      }
+      toolConversationRef.current = true; // stay on tool session for follow-ups
+      await handleFunctionCall(session, functionCalls[0], 0);
     } else {
-      // Plain text response
       const text = safeText(response);
       if (!text) throw new Error("Empty Gemini response");
+
+      // Detect if Gemini output a function call as text (e.g. "regenerateDay(1, 2, 'back')")
+      // This happens when the chat session (no tools) tries to "call" a function
+      // Only match known tool names to avoid false-positives on normal text
+      const textCallMatch = text.match(/\b(getActiveProgram|swapExercise|adjustVolume|skipWorkoutDay|regenerateDay|regenerateWeek|generateDeloadWeek|getRecentPerformance)\s*\(/);
+      if (textCallMatch && !useTools && toolSession) {
+        // Re-send to tool session so it can make the actual function call
+        const retryResult = await sendWithRetry(toolSession, userInput);
+        const retryFCs = retryResult.response.functionCalls();
+        if (retryFCs && retryFCs.length > 0) {
+          toolConversationRef.current = true;
+          await handleFunctionCall(toolSession, retryFCs[0], 0);
+          deliverFriction();
+          return;
+        }
+        // If still no function call, show the retry text
+        const retryText = safeText(retryResult.response);
+        if (retryText) {
+          addAgentMessage(retryText);
+          deliverFriction();
+          return;
+        }
+      }
+
+      // If agent asked a follow-up question (like "what focus?"), keep tool conversation alive
+      if (text.includes("?") && useTools) {
+        toolConversationRef.current = true;
+      } else if (!useTools) {
+        toolConversationRef.current = false;
+      }
+
       const mode = detectMode(userInput);
       addAgentMessage(text, mode);
     }
@@ -394,15 +734,26 @@ export default function AIAgent() {
 
   /** Confirm a pending write action proposal */
   const handleConfirmAction = async () => {
-    if (!pendingProposal || !chatSession) return;
+    if (!pendingProposal || !toolSession) return;
     setIsThinking(true);
 
     try {
       // Execute the Firestore write
       await pendingProposal.execute();
 
+      // Log the modification for future agent context
+      if (user) {
+        const modId = `mod_${Date.now()}`;
+        setDocument(`users/${user.uid}/programModifications/${modId}`, {
+          action: pendingProposal.actionName,
+          description: pendingProposal.description,
+          programId: pendingProposal.programId,
+          timestamp: new Date().toISOString(),
+        }).catch(console.warn);
+      }
+
       // Send success back to Gemini so it can confirm in character
-      const followUp = await chatSession.sendMessage([{
+      const followUp = await toolSession.sendMessage([{
         functionResponse: {
           name: pendingProposal.actionName,
           response: { success: true, message: "Changes applied successfully." },
@@ -410,7 +761,64 @@ export default function AIAgent() {
       }]);
 
       const text = safeText(followUp.response) || "Protocol updated. Changes applied.";
-      addAgentMessage(text);
+
+      // Refresh active program to get the updated data
+      let updatedProgram: (Program & { id: string }) | null = null;
+      if (user) {
+        const programs = await queryCollection<Program & { id: string; active: boolean }>(
+          `users/${user.uid}/programs`,
+          [where("active", "==", true)]
+        );
+        if (programs[0]) {
+          updatedProgram = programs[0];
+          setActiveProgram(updatedProgram);
+        }
+      }
+
+      // Extract the edited section from the proposal description to show updated data
+      // Parse weekNumber/dayNumber from the proposal description
+      const weekMatch = pendingProposal.description.match(/Week (\d+)/);
+      const dayMatch = pendingProposal.description.match(/Day (\d+)/);
+      const editedWeekNum = weekMatch ? parseInt(weekMatch[1]) : null;
+      const editedDayNum = dayMatch ? parseInt(dayMatch[1]) : null;
+
+      // Build programData showing only the edited section
+      let editedProgramData: Message["programData"] | undefined;
+      if (updatedProgram && editedWeekNum) {
+        const editedWeek = updatedProgram.weeks.find(w => w.weekNumber === editedWeekNum);
+        if (editedWeek) {
+          // If a specific day was edited, show just that day; otherwise show the whole week
+          const daysToShow = editedDayNum
+            ? editedWeek.days.filter(d => d.dayNumber === editedDayNum)
+            : editedWeek.days;
+
+          editedProgramData = {
+            name: `${updatedProgram.name} — Updated`,
+            weeks: [{
+              weekNumber: editedWeek.weekNumber,
+              days: daysToShow.map(d => ({
+                dayNumber: d.dayNumber,
+                name: d.name,
+                exercises: d.exercises.map(e => ({
+                  name: e.name,
+                  sets: e.sets,
+                  reps: e.reps,
+                  rest: e.rest,
+                })),
+              })),
+            }],
+          };
+        }
+      }
+
+      // Add agent message with the edited program section attached
+      const confirmMsg: Message = {
+        type: "ai",
+        text,
+        timestamp: getTimestamp(),
+        programData: editedProgramData,
+      };
+      setMessages(prev => [...prev, confirmMsg]);
 
       // System confirmation
       setMessages(prev => [...prev, {
@@ -418,15 +826,6 @@ export default function AIAgent() {
         text: "PROTOCOL UPDATED",
         timestamp: getTimestamp(),
       }]);
-
-      // Refresh active program
-      if (user) {
-        const programs = await queryCollection<Program & { id: string; active: boolean }>(
-          `users/${user.uid}/programs`,
-          [where("active", "==", true)]
-        );
-        if (programs[0]) setActiveProgram(programs[0]);
-      }
     } catch (err) {
       console.warn("[AIAgent] Confirm action failed:", err);
       setMessages(prev => [...prev, {
@@ -445,8 +844,8 @@ export default function AIAgent() {
     if (!pendingProposal) return;
 
     try {
-      if (chatSession) {
-        const followUp = await chatSession.sendMessage([{
+      if (toolSession) {
+        const followUp = await toolSession.sendMessage([{
           functionResponse: {
             name: pendingProposal.actionName,
             response: { success: false, message: "Operator rejected the proposed changes." },
@@ -475,10 +874,9 @@ export default function AIAgent() {
   const confirmAgentChange = () => {
     setCurrentAgent(selectedAgent);
     setShowAgentModal(false);
-    // Clear conversation history + recreate Gemini session
-    setConversationHistory([]);
     setPendingProposal(null);
-    initializeGemini(selectedAgent, userProfile, activeProgram);
+    toolConversationRef.current = false;
+    initializeGemini(selectedAgent, userProfile, activeProgram, undefined, undefined, messages);
     // Add system message for agent switch
     setMessages(prev => [
       ...prev,
@@ -641,24 +1039,38 @@ export default function AIAgent() {
                     → Exercise Preview
                   </div>
                   <div className="space-y-2">
-                    {message.planData?.exercises.map((exercise, i) => (
-                      <div
-                        key={i}
-                        className={`flex items-center justify-between text-[9px] border-b border-white/10 pb-1.5 ${
-                          exercise.changed ? "border-l-2 border-l-[#ff6600] pl-2" : ""
-                        }`}
-                      >
-                        <span className="font-['JetBrains_Mono',monospace] text-white/80 flex items-center gap-1.5">
-                          [{(i + 1).toString().padStart(2, '0')}] {exercise.name}
-                          {exercise.changed && (
-                            <span className="text-[7px] text-black bg-[#ff6600] px-1 py-0.5 font-bold">NEW</span>
+                    {message.planData?.exercises.map((exercise, i) => {
+                      // Show day label header when it changes
+                      const prevDay = i > 0 ? message.planData!.exercises[i - 1].dayLabel : null;
+                      const showDayHeader = exercise.dayLabel && exercise.dayLabel !== prevDay;
+                      return (
+                        <div key={i}>
+                          {showDayHeader && (
+                            <div className="font-['JetBrains_Mono',monospace] text-[8px] text-[#ff6600]/80 uppercase tracking-wide mt-2 mb-1 pt-1 border-t border-white/5">
+                              {exercise.dayLabel}
+                            </div>
                           )}
-                        </span>
-                        <span className="font-['JetBrains_Mono',monospace] text-white/60">
-                          {exercise.sets}x{exercise.reps} • {exercise.rest}
-                        </span>
-                      </div>
-                    ))}
+                          <div
+                            className={`flex items-center justify-between text-[9px] border-b border-white/10 pb-1.5 ${
+                              exercise.changed ? "border-l-2 border-l-[#ff6600] pl-2" : ""
+                            } ${exercise.replacing ? "border-l-2 border-l-red-500/60 pl-2 opacity-70" : ""}`}
+                          >
+                            <span className="font-['JetBrains_Mono',monospace] text-white/80 flex items-center gap-1.5">
+                              {exercise.name}
+                              {exercise.changed && (
+                                <span className="text-[7px] text-black bg-[#ff6600] px-1 py-0.5 font-bold">NEW</span>
+                              )}
+                              {exercise.replacing && (
+                                <span className="text-[7px] text-white/50 bg-red-500/30 px-1 py-0.5 font-bold">REPLACE</span>
+                              )}
+                            </span>
+                            <span className="font-['JetBrains_Mono',monospace] text-white/60">
+                              {exercise.sets}x{exercise.reps} • {exercise.rest}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
