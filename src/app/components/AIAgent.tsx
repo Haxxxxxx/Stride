@@ -117,8 +117,6 @@ const MAX_IN_MEMORY_MESSAGES = 60; // Cap in-memory messages to prevent unbounde
 const MAX_GEMINI_HISTORY = 10; // Last N user+ai turns to pass as Gemini conversation history
 const FIRESTORE_SAVE_DEBOUNCE = 15000; // Debounce Firestore writes (15s reduces cost ~70%)
 
-let firestoreSaveTimer: ReturnType<typeof setTimeout> | null = null;
-
 /** Load chat history from localStorage (fast, synchronous) */
 function loadChatHistoryLocal(): Message[] | null {
   try {
@@ -201,7 +199,10 @@ function buildGeminiHistory(messages: Message[]): { role: "user" | "model"; part
   return history;
 }
 
-function saveChatHistory(messages: Message[], agent: string, uid?: string) {
+function saveChatHistory(
+  messages: Message[], agent: string, uid?: string,
+  timerRef?: React.MutableRefObject<ReturnType<typeof setTimeout> | null>
+) {
   // Only persist text-based messages, skip proposals (non-serializable execute fn)
   const toSave = messages
     .filter(m => m.type !== "proposal")
@@ -214,9 +215,9 @@ function saveChatHistory(messages: Message[], agent: string, uid?: string) {
   } catch { /* quota exceeded — ignore */ }
 
   // Firestore — debounced (cross-device backup)
-  if (uid) {
-    if (firestoreSaveTimer) clearTimeout(firestoreSaveTimer);
-    firestoreSaveTimer = setTimeout(() => {
+  if (uid && timerRef) {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
       setDocument(`users/${uid}/chatHistory/latest`, payload).catch(() => {});
     }, FIRESTORE_SAVE_DEBOUNCE);
   }
@@ -246,6 +247,7 @@ export default function AIAgent() {
   const [pendingProposal, setPendingProposal] = useState<ActionProposal | null>(null);
   const [activeProgram, setActiveProgram] = useState<(Program & { id: string }) | null>(null);
   const lastSendRef = useRef(0); // rate limiting
+  const firestoreSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -262,7 +264,7 @@ export default function AIAgent() {
   // Persist chat history + cap in-memory messages
   useEffect(() => {
     if (messages.length > 2) {
-      saveChatHistory(messages, currentAgent, user?.uid);
+      saveChatHistory(messages, currentAgent, user?.uid, firestoreSaveTimerRef);
     }
     // Window: keep only last MAX_IN_MEMORY_MESSAGES to prevent unbounded growth
     if (messages.length > MAX_IN_MEMORY_MESSAGES) {
@@ -273,9 +275,9 @@ export default function AIAgent() {
   // Flush pending Firestore save immediately on unmount (captures last message before close)
   useEffect(() => {
     return () => {
-      if (firestoreSaveTimer && user?.uid) {
-        clearTimeout(firestoreSaveTimer);
-        firestoreSaveTimer = null;
+      if (firestoreSaveTimerRef.current && user?.uid) {
+        clearTimeout(firestoreSaveTimerRef.current);
+        firestoreSaveTimerRef.current = null;
         const toSave = messages.filter(m => m.type !== "proposal").slice(-MAX_PERSISTED_MESSAGES);
         if (toSave.length > 2) {
           setDocument(`users/${user.uid}/chatHistory/latest`, {

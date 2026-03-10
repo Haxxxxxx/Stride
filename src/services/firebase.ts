@@ -25,6 +25,9 @@ export const functions = getFunctions(app);
 
 // App Check — prevents unauthorized API abuse (Gemini billing safety)
 // Requires: VITE_RECAPTCHA_SITE_KEY env var + reCAPTCHA Enterprise enabled in Firebase Console
+if (import.meta.env.DEV) {
+  (self as unknown as Record<string, unknown>).FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+}
 const recaptchaKey = import.meta.env.VITE_RECAPTCHA_SITE_KEY;
 if (recaptchaKey) {
   initializeAppCheck(app, {

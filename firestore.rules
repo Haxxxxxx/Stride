@@ -25,6 +25,12 @@ service cloud.firestore {
       match /workoutLogs/{logId} {
         allow read, create: if request.auth != null && request.auth.uid == uid;
       }
+      match /programModifications/{modId} {
+        allow read, create: if request.auth != null && request.auth.uid == uid;
+      }
+      match /chatHistory/{docId} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
       match /notifications/{notifId} {
         allow read, write: if request.auth != null && request.auth.uid == uid;
       }

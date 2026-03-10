@@ -16,9 +16,12 @@ export default function LandingGate() {
   const [routing, setRouting] = useState(false);
 
   useEffect(() => {
+    // Don't route if: still loading, no user, or redirect handler will handle it
     if (loading || !user || pendingRedirectUser) return;
     setRouting(true);
-    routeAfterAuth(user.uid, navigate).catch(console.error);
+    routeAfterAuth(user.uid, navigate)
+      .catch(console.error)
+      .finally(() => setRouting(false));
   }, [user, loading, pendingRedirectUser]);
 
   // Show nothing while auth is resolving or we're routing away

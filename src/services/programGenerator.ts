@@ -16,6 +16,33 @@ export interface Exercise {
   notes?: string;
 }
 
+/** Actual performance data captured per set during workout execution */
+export interface ActualSetData {
+  setNumber: number;
+  weight: number;
+  repsCompleted: number;
+  rpe: number;            // 1-10 Rate of Perceived Exertion
+  formQuality: number;    // 1-5
+  pain: 'none' | 'mild' | 'moderate' | 'severe';
+}
+
+/** Rich exercise log saved to Firestore after workout */
+export interface ExerciseLog {
+  name: string;
+  plannedSets: number;
+  plannedReps: string;
+  rest: string;
+  actualSets: ActualSetData[];
+}
+
+/** Pre-workout readiness check */
+export interface ReadinessData {
+  sleepQuality: number;   // 1-5
+  energyLevel: number;    // 1-5
+  painReported: boolean;
+  painLocation?: string;
+}
+
 export interface WorkoutDay {
   dayNumber: number;
   name: string;
@@ -24,6 +51,7 @@ export interface WorkoutDay {
 
 export interface Week {
   weekNumber: number;
+  weekType?: 'accumulation' | 'intensification' | 'deload';
   days: WorkoutDay[];
 }
 
@@ -113,10 +141,21 @@ function buildPromptText(data: PersonalizationData): string {
   lines.push(
     `- Training days per week: ${daysPerWeek}`,
     ``,
+    `Periodization model (follow strictly):`,
+    `- Week 1 (Accumulation): 3-4 sets, 10-15 reps. Build volume base. RPE 6-7.`,
+    `- Week 2 (Accumulation): Add 1 set per compound. Volume peaks. RPE 7-8.`,
+    `- Week 3 (Intensification): 4-5 sets, 6-10 reps, heavier loads. RPE 8-9.`,
+    `- Week 4 (Deload): Reduce sets by 40% from Week 1. Same exercises. RPE 5-6.`,
+    ``,
+    `Exercise ordering per day (strict):`,
+    `1. Warm-up/activation (1-2 movements, light)`,
+    `2. Heavy compound lifts (2-3 movements) — MUST come first after warm-up`,
+    `3. Accessory/isolation work (2-3 movements)`,
+    `4. Finisher/conditioning (0-1 movement, skip if time-constrained)`,
+    ``,
     `Rules:`,
     `- Each day should have 4-7 exercises appropriate for the goal and body profile`,
-    `- Progressive overload: slightly increase volume or intensity each week`,
-    `- Include warm-up movements at the start of each session`,
+    `- Order exercises: heavy compounds before accessories, never isolation before compound`,
     `- Match exercises to available equipment only — do not prescribe equipment the operator doesn't have`,
     `- Keep each session within the ${formatSessionTime(data.sessionTime)} time constraint`,
     `- If the operator has constraints (injury, time, energy), adjust exercise selection and intensity accordingly`,
@@ -170,16 +209,28 @@ export async function generateProgram(data: PersonalizationData): Promise<Progra
 export async function generateWeek(
   weekNumber: number,
   daysCount: number,
-  focus?: string
+  focus?: string,
+  personalization?: PersonalizationData
 ): Promise<WorkoutDay[]> {
   try {
     const model = createProgramModel(
       "You are a professional fitness program designer for the STRIDE training system. Generate structured workout days in JSON format."
     );
 
+    const contextLines: string[] = [];
+    if (personalization) {
+      if (personalization.equipmentAccess) contextLines.push(`Available equipment: ${Array.isArray(personalization.equipmentAccess) ? personalization.equipmentAccess.join(", ") : personalization.equipmentAccess}`);
+      if (personalization.constraints?.length) contextLines.push(`Constraints/injuries: ${personalization.constraints.join(", ")}`);
+      if (personalization.sessionTime) contextLines.push(`Session time: ${personalization.sessionTime} min`);
+      if (personalization.experience) contextLines.push(`Experience: ${personalization.experience}`);
+      if (personalization.optimizationGoal) contextLines.push(`Goal: ${personalization.optimizationGoal}`);
+    }
+
     const prompt = `Generate ${daysCount} workout days for week ${weekNumber} of a training program.
 ${focus ? `Focus: ${focus}` : "General balanced training."}
-Each day should have 4-7 exercises with progressive overload appropriate for week ${weekNumber}.`;
+Each day should have 4-7 exercises with progressive overload appropriate for week ${weekNumber}.
+${contextLines.length ? "\nOperator context:\n" + contextLines.join("\n") : ""}
+Only prescribe exercises the operator can do with their available equipment.`;
 
     const result = await model.generateContent(prompt);
     const text = result.response.text();
@@ -207,9 +258,140 @@ Each day should have 4-7 exercises with progressive overload appropriate for wee
   }
 }
 
+/**
+ * Generate exercises for a single day with a specific focus (used by regenerateDay agent action).
+ */
+export async function generateDay(
+  focus: string,
+  exerciseCount: number = 5,
+  personalization?: PersonalizationData
+): Promise<Exercise[]> {
+  try {
+    const model = createProgramModel(
+      "You are a professional fitness program designer for the STRIDE training system. Generate structured workout data in JSON format."
+    );
+
+    const contextLines: string[] = [];
+    if (personalization) {
+      if (personalization.equipmentAccess) contextLines.push(`Available equipment: ${Array.isArray(personalization.equipmentAccess) ? personalization.equipmentAccess.join(", ") : personalization.equipmentAccess}`);
+      if (personalization.constraints?.length) contextLines.push(`Constraints/injuries: ${personalization.constraints.join(", ")}`);
+      if (personalization.sessionTime) contextLines.push(`Session time: ${personalization.sessionTime} min`);
+      if (personalization.experience) contextLines.push(`Experience: ${personalization.experience}`);
+    }
+
+    const prompt = `Generate a single workout day focused on: ${focus}.
+Include exactly ${exerciseCount} exercises. Use appropriate sets (3-5), reps, and rest times.
+Match the focus area precisely — if the operator wants "chest and abs", all exercises should target chest or abs.
+${contextLines.length ? "\nOperator context:\n" + contextLines.join("\n") : ""}
+IMPORTANT: Only prescribe exercises the operator can do with their available equipment. Respect constraints.`;
+
+    const result = await withTimeout(
+      model.generateContent(prompt),
+      30000,
+      "Gemini day generation"
+    );
+    const text = result.response.text();
+    const parsed = JSON.parse(text);
+
+    // Extract exercises from the schema response
+    if (parsed.weeks?.[0]?.days?.[0]?.exercises) {
+      return parsed.weeks[0].days[0].exercises;
+    }
+    throw new Error("Unexpected structure");
+  } catch (err) {
+    console.warn("[ProgramGenerator] generateDay failed, using fallback:", err);
+    return buildFallbackDay(focus, exerciseCount);
+  }
+}
+
+function buildFallbackDay(focus: string, count: number): Exercise[] {
+  const lower = focus.toLowerCase();
+  // Focus-aware fallback exercises
+  const pools: Record<string, Exercise[]> = {
+    chest: [
+      { name: "Barbell Bench Press", sets: 4, reps: "8-10", rest: "90s" },
+      { name: "Incline Dumbbell Press", sets: 3, reps: "10", rest: "60s" },
+      { name: "Cable Chest Fly", sets: 3, reps: "12", rest: "45s" },
+      { name: "Push-Ups", sets: 3, reps: "15", rest: "45s" },
+      { name: "Dips (Chest)", sets: 3, reps: "10", rest: "60s" },
+      { name: "Decline Bench Press", sets: 3, reps: "10", rest: "60s" },
+    ],
+    abs: [
+      { name: "Cable Crunches", sets: 3, reps: "15", rest: "45s" },
+      { name: "Hanging Leg Raises", sets: 3, reps: "12", rest: "45s" },
+      { name: "Plank Hold", sets: 3, reps: "60s", rest: "30s" },
+      { name: "Russian Twists", sets: 3, reps: "20", rest: "30s" },
+      { name: "Ab Rollout", sets: 3, reps: "10", rest: "45s" },
+    ],
+    legs: [
+      { name: "Barbell Squats", sets: 4, reps: "8", rest: "120s" },
+      { name: "Romanian Deadlift", sets: 3, reps: "10", rest: "90s" },
+      { name: "Leg Press", sets: 3, reps: "12", rest: "90s" },
+      { name: "Leg Curl", sets: 3, reps: "12", rest: "60s" },
+      { name: "Calf Raises", sets: 4, reps: "15", rest: "45s" },
+      { name: "Walking Lunges", sets: 3, reps: "12 each", rest: "60s" },
+    ],
+    back: [
+      { name: "Barbell Rows", sets: 4, reps: "8-10", rest: "90s" },
+      { name: "Lat Pulldown", sets: 3, reps: "12", rest: "60s" },
+      { name: "Cable Rows", sets: 3, reps: "12", rest: "60s" },
+      { name: "Face Pulls", sets: 3, reps: "15", rest: "45s" },
+      { name: "Dumbbell Rows", sets: 3, reps: "10", rest: "60s" },
+    ],
+    shoulders: [
+      { name: "Overhead Press", sets: 4, reps: "8-10", rest: "90s" },
+      { name: "Lateral Raises", sets: 3, reps: "15", rest: "45s" },
+      { name: "Face Pulls", sets: 3, reps: "15", rest: "45s" },
+      { name: "Front Raises", sets: 3, reps: "12", rest: "45s" },
+      { name: "Rear Delt Fly", sets: 3, reps: "15", rest: "45s" },
+    ],
+    arms: [
+      { name: "Bicep Curls", sets: 3, reps: "12", rest: "45s" },
+      { name: "Tricep Pushdowns", sets: 3, reps: "12", rest: "45s" },
+      { name: "Hammer Curls", sets: 3, reps: "10", rest: "45s" },
+      { name: "Overhead Tricep Extension", sets: 3, reps: "12", rest: "45s" },
+      { name: "Preacher Curls", sets: 3, reps: "10", rest: "45s" },
+    ],
+  };
+
+  // Collect exercises from matching focus areas
+  const selected: Exercise[] = [];
+  for (const [key, exercises] of Object.entries(pools)) {
+    if (lower.includes(key)) {
+      selected.push(...exercises);
+    }
+  }
+
+  // If no match, use general mix
+  if (selected.length === 0) {
+    selected.push(
+      ...pools.chest.slice(0, 2),
+      ...pools.legs.slice(0, 2),
+      ...pools.abs.slice(0, 1),
+    );
+  }
+
+  return selected.slice(0, count);
+}
+
 // ============================================================
 // Fallback Template Program
 // ============================================================
+
+/** Reduce rep range for intensification weeks (e.g. "10-15" → "6-10", "15" → "10") */
+function lowerReps(reps: string): string {
+  // Handle ranges like "8-10"
+  const rangeMatch = reps.match(/^(\d+)-(\d+)$/);
+  if (rangeMatch) {
+    const low = Math.max(4, parseInt(rangeMatch[1]) - 3);
+    const high = Math.max(low + 2, parseInt(rangeMatch[2]) - 3);
+    return `${low}-${high}`;
+  }
+  // Handle single numbers
+  const num = parseInt(reps);
+  if (!isNaN(num)) return String(Math.max(4, num - 4));
+  return reps; // non-numeric (e.g. "45s" for planks)
+}
 
 function buildFallbackProgram(data: PersonalizationData): Program {
   const daysPerWeek = getDaysPerWeek(data);
@@ -266,17 +448,39 @@ function buildFallbackProgram(data: PersonalizationData): Program {
 
   const exercisePool = hasGym ? gymExercises : bodyweightExercises;
 
-  const weeks: Week[] = Array.from({ length: 4 }, (_, wi) => ({
-    weekNumber: wi + 1,
-    days: Array.from({ length: Math.min(daysPerWeek, exercisePool.length) }, (_, di) => ({
-      dayNumber: di + 1,
-      name: `Session ${String.fromCharCode(65 + di)}`,
-      exercises: exercisePool[di % exercisePool.length].map((ex) => ({
-        ...ex,
-        sets: ex.sets + Math.floor(wi / 2),
+  // Periodization: Week 1-2 accumulation, Week 3 intensification, Week 4 deload
+  const weekTypes: Array<Week["weekType"]> = ['accumulation', 'accumulation', 'intensification', 'deload'];
+
+  const weeks: Week[] = Array.from({ length: 4 }, (_, wi) => {
+    const weekType = weekTypes[wi];
+    return {
+      weekNumber: wi + 1,
+      weekType,
+      days: Array.from({ length: Math.min(daysPerWeek, exercisePool.length) }, (_, di) => ({
+        dayNumber: di + 1,
+        name: `Session ${String.fromCharCode(65 + di)}`,
+        exercises: exercisePool[di % exercisePool.length].map((ex) => {
+          switch (weekType) {
+            case 'accumulation':
+              // Week 1: base, Week 2: +1 set
+              return { ...ex, sets: ex.sets + (wi === 1 ? 1 : 0) };
+            case 'intensification':
+              // Week 3: same sets as week 2, lower reps (heavier)
+              return {
+                ...ex,
+                sets: ex.sets + 1,
+                reps: lowerReps(ex.reps),
+              };
+            case 'deload':
+              // Week 4: reduce sets by ~40%, keep reps moderate
+              return { ...ex, sets: Math.max(2, Math.ceil(ex.sets * 0.6)) };
+            default:
+              return ex;
+          }
+        }),
       })),
-    })),
-  }));
+    };
+  });
 
   return {
     name: "Operation Baseline",

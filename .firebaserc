@@ -1,5 +1,7 @@
 {
-  "projects": {},
+  "projects": {
+    "default": "stride-a333e"
+  },
   "targets": {},
   "etags": {}
 }

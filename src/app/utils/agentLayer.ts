@@ -204,6 +204,12 @@ export function detectMode(userInput: string): AgentMode {
     return "identityFraming";
   }
 
+  // Check if this is a program action request — don't misclassify as clarification
+  const actionKeywords = ["program", "workout", "exercise", "change", "edit", "modify", "swap", "replace", "show", "recalibrate", "adjust", "customize", "plan"];
+  if (actionKeywords.some((t) => lower.includes(t))) {
+    return "identityFraming"; // Treat as action-oriented, not hesitation
+  }
+
   // Check for clarification (confusion, hesitation, delay)
   const clarificationTriggers = [
     "feel like", "tired", "tomorrow", "don't know", "confused", "can't",
@@ -253,6 +259,17 @@ function getClarificationResponse(input: string): string {
       return responses[Math.floor(Math.random() * responses.length)];
     }
   }
+  // Check if this is a program modification request — don't give generic motivational BS
+  const programKeywords = ["program", "workout", "exercise", "plan", "change", "edit", "modify", "swap", "replace", "chest", "legs", "arms", "back", "abs", "shoulders", "more", "less", "today", "schedule", "customize", "recalibrate", "adjust", "routine", "training", "session"];
+  if (programKeywords.some((k) => input.includes(k))) {
+    const programResponses = [
+      "System connection interrupted. Use 'Show my program' to load your protocol, then request modifications.",
+      "Neural link unstable. Retry your request — use a specific command like 'Show my program' first.",
+      "Processing delayed. Try: 'Show my program' to view your current protocol, then specify changes.",
+    ];
+    return programResponses[Math.floor(Math.random() * programResponses.length)];
+  }
+
   // Generic clarification
   const generic = [
     "Clarify: is this a constraint or a preference?",

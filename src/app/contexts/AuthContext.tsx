@@ -31,14 +31,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let redirectDone = false;
-    // Track all timer handles for cleanup on unmount
     const timers: { polls: ReturnType<typeof setInterval>[]; timeouts: ReturnType<typeof setTimeout>[] } = {
       polls: [],
       timeouts: [],
     };
 
-    // Handle Google redirect result FIRST, then start auth listener.
-    // This prevents onAuthChange from setting loading=false before redirect is processed.
     checkRedirectResult()
       .then((result) => {
         if (result?.user) {
@@ -58,18 +55,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const unsubscribe = onAuthChange((u) => {
       setUser(u);
 
-      // Wire behaviorStore to Firestore sync
+      // Wire behaviorStore to Firestore sync — getIdToken ensures the auth
+      // token is ready before any Firestore reads (ensureAuthReady in firestore.ts
+      // handles this too, but belt-and-suspenders for the behavior store).
       setAuthUid(u?.uid ?? null);
       if (u) {
-        syncFromFirestore(u.uid).catch(console.warn);
+        u.getIdToken()
+          .then(() => syncFromFirestore(u.uid))
+          .catch(console.warn);
       }
 
-      // Only clear loading after redirect check is done to prevent
-      // LandingGate/RedirectHandler from racing with each other
       if (redirectDone) {
         setLoading(false);
       } else {
-        // onAuthChange fired before redirect resolved — wait for it
         const poll = setInterval(() => {
           if (redirectDone) {
             setLoading(false);
@@ -77,7 +75,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
         }, 50);
         timers.polls.push(poll);
-        // Safety: clear loading after 3s max regardless
         const safety = setTimeout(() => {
           clearInterval(poll);
           setLoading(false);
