@@ -6,3 +6,6 @@ dist/
 firebase-debug.log
 *.zip
 STRIDE App/
+.firebase/
+.ralph/logs/
+STRIDE Website/
