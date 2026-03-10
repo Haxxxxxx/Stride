@@ -36,12 +36,12 @@ const MODEL = "gemini-2.5-flash";
 const agentTools: FunctionDeclaration[] = [
   {
     name: "getActiveProgram",
-    description: "Get operator's active program (weeks, days, exercises). Use when asked about program/schedule.",
+    description: "Fetch operator's active training program.",
     parameters: { type: SchemaType.OBJECT, properties: {} } as ObjectSchemaRequest,
   },
   {
     name: "swapExercise",
-    description: "Replace an exercise. Use when operator asks to swap/change an exercise.",
+    description: "Replace one exercise with another.",
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
@@ -58,7 +58,7 @@ const agentTools: FunctionDeclaration[] = [
   },
   {
     name: "adjustVolume",
-    description: "Change sets/reps/rest for an exercise.",
+    description: "Change sets/reps/rest.",
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
@@ -74,7 +74,7 @@ const agentTools: FunctionDeclaration[] = [
   },
   {
     name: "skipWorkoutDay",
-    description: "Skip a workout day.",
+    description: "Skip a day.",
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
@@ -87,7 +87,7 @@ const agentTools: FunctionDeclaration[] = [
   },
   {
     name: "regenerateDay",
-    description: "Regenerate all exercises for a single day. Use when operator wants to change an entire day's workout or shift focus (e.g. 'more chest today', 'make today legs').",
+    description: "Rebuild all exercises for one day.",
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
@@ -101,7 +101,7 @@ const agentTools: FunctionDeclaration[] = [
   },
   {
     name: "regenerateWeek",
-    description: "Regenerate ALL days of an entire week. Use when operator wants a completely new week.",
+    description: "Rebuild entire week.",
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
@@ -111,13 +111,36 @@ const agentTools: FunctionDeclaration[] = [
       required: ["weekNumber"],
     } as ObjectSchemaRequest,
   },
+  {
+    name: "generateDeloadWeek",
+    description: "Create deload week (~60% volume).",
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        weekNumber: { type: SchemaType.NUMBER, description: "Week to base deload on (1-based)" },
+      },
+      required: ["weekNumber"],
+    } as ObjectSchemaRequest,
+  },
+  {
+    name: "getRecentPerformance",
+    description: "Get exercise performance history.",
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        exerciseName: { type: SchemaType.STRING, description: "Exercise to look up (e.g. 'Bench Press')" },
+        limit: { type: SchemaType.NUMBER, description: "Number of recent sessions to check (default 5)" },
+      },
+      required: ["exerciseName"],
+    } as ObjectSchemaRequest,
+  },
 ];
 
 // ============================================================
 // Keywords that indicate the user needs tool access
 // ============================================================
 
-const TOOL_KEYWORDS = /\b(program|protocol|schedule|exercise|swap|replace|change|adjust|volume|sets|reps|rest|skip|regenerate|edit|modify|show|week|day|workout|routine|training|plan|session|customize|update|redo|redo|switch|remove|add|today|tomorrow|next)\b/i;
+const TOOL_KEYWORDS = /\b(program|protocol|schedule|exercise|swap|replace|change|adjust|volume|sets|reps|rest|skip|regenerate|edit|modify|show|week|day|workout|routine|training|plan|session|customize|update|redo|switch|remove|add|today|tomorrow|next|deload|recovery|lighter|easier|progress|performance|pr|weight|trend|history)\b/i;
 
 /** Check if a user message likely needs tool access */
 export function needsTools(message: string): boolean {
@@ -139,7 +162,7 @@ export function createAgentModel(systemInstruction: string): GenerativeModel {
     tools: [{ functionDeclarations: agentTools }],
     generationConfig: {
       temperature: 0.8,
-      maxOutputTokens: 256,
+      maxOutputTokens: 512,
     },
   });
 }
@@ -154,7 +177,7 @@ export function createChatModel(systemInstruction: string): GenerativeModel {
     systemInstruction,
     generationConfig: {
       temperature: 0.8,
-      maxOutputTokens: 256,
+      maxOutputTokens: 512,
     },
   });
 }
@@ -168,7 +191,7 @@ export function createProgramModel(systemInstruction: string): GenerativeModel {
     systemInstruction,
     generationConfig: {
       temperature: 0.6,
-      maxOutputTokens: 8192,
+      maxOutputTokens: 4096,
       responseMimeType: "application/json",
       responseSchema: {
         type: SchemaType.OBJECT,
