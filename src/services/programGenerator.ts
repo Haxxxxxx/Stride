@@ -117,7 +117,11 @@ function buildPromptText(data: PersonalizationData): string {
   ];
 
   if (data.height?.value) {
-    lines.push(`- Height: ${data.height.value} ${data.height.unit}`);
+    // Feet stored as "5'9" — format as 5'9" for LLM readability
+    const htDisplay = data.height.unit === "ft" && data.height.value.includes("'")
+      ? `${data.height.value}"`
+      : `${data.height.value} ${data.height.unit}`;
+    lines.push(`- Height: ${htDisplay}`);
   }
   if (data.weight?.value) {
     lines.push(`- Weight: ${data.weight.value} ${data.weight.unit}`);
@@ -236,9 +240,10 @@ Only prescribe exercises the operator can do with their available equipment.`;
     const text = result.response.text();
     const parsed = JSON.parse(text);
 
-    // The schema returns a full Program, extract the week's days
-    if (parsed.weeks?.[0]?.days) {
-      return parsed.weeks[0].days;
+    // The schema returns a full Program — find the matching week or use first
+    if (parsed.weeks?.length) {
+      const match = parsed.weeks.find((w: { weekNumber?: number }) => w.weekNumber === weekNumber) ?? parsed.weeks[0];
+      if (match?.days) return match.days;
     }
     throw new Error("Unexpected structure");
   } catch (err) {
@@ -293,9 +298,11 @@ IMPORTANT: Only prescribe exercises the operator can do with their available equ
     const text = result.response.text();
     const parsed = JSON.parse(text);
 
-    // Extract exercises from the schema response
-    if (parsed.weeks?.[0]?.days?.[0]?.exercises) {
-      return parsed.weeks[0].days[0].exercises;
+    // Extract exercises from the schema response — check all weeks/days for the data
+    for (const week of parsed.weeks ?? []) {
+      for (const day of week.days ?? []) {
+        if (day.exercises?.length) return day.exercises;
+      }
     }
     throw new Error("Unexpected structure");
   } catch (err) {
@@ -351,6 +358,14 @@ function buildFallbackDay(focus: string, count: number): Exercise[] {
       { name: "Hammer Curls", sets: 3, reps: "10", rest: "45s" },
       { name: "Overhead Tricep Extension", sets: 3, reps: "12", rest: "45s" },
       { name: "Preacher Curls", sets: 3, reps: "10", rest: "45s" },
+    ],
+    cardio: [
+      { name: "Treadmill HIIT", sets: 1, reps: "20-30 min (30s sprint, 90s active recovery)", rest: "N/A" },
+      { name: "Jump Rope", sets: 4, reps: "3 min", rest: "60s" },
+      { name: "Rowing Machine", sets: 1, reps: "15-20 min", rest: "N/A" },
+      { name: "Burpees", sets: 4, reps: "15", rest: "45s" },
+      { name: "Mountain Climbers", sets: 4, reps: "30", rest: "30s" },
+      { name: "Battle Ropes", sets: 4, reps: "30s", rest: "45s" },
     ],
   };
 

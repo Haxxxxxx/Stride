@@ -2,8 +2,9 @@
 // Executes agentic function calls from Gemini on user programs
 // Read actions return data immediately; write actions return proposals for user confirmation
 
-import { queryCollection, updateDocument, where, getDocument, orderBy, limit } from "./firestore";
+import { queryCollection, updateDocument, where, getDocument, setDocument, orderBy, limit } from "./firestore";
 import type { Program, Exercise, Week, WorkoutDay, PersonalizationData } from "./programGenerator";
+import { toLocalISO, getCurrentProgramWeek } from "../app/utils/dateUtils";
 
 // ============================================================
 // Types
@@ -22,6 +23,8 @@ export interface ExercisePreview extends Exercise {
 
 export interface ActionProposal {
   actionName: string;
+  /** Original function name from Gemini (may be snake_case) — used in functionResponse */
+  originalName?: string;
   description: string;
   preview: { exercises: ExercisePreview[] };
   programId: string;
@@ -74,8 +77,9 @@ async function handleGetActiveProgram(uid: string): Promise<ActionResult> {
     };
   }
 
-  // Summarize for the model
-  const currentWeek = program.weeks[0]; // Could be smarter with date tracking
+  // Calculate current week using shared utility (same formula as Dashboard + AIAgent)
+  const currentWeekNum = getCurrentProgramWeek(program.createdAt, program.weeks.length);
+
   return {
     type: "data",
     data: {
@@ -85,6 +89,7 @@ async function handleGetActiveProgram(uid: string): Promise<ActionResult> {
       totalWeeks: program.weeks.length,
       weeks: program.weeks.map((w) => ({
         weekNumber: w.weekNumber,
+        weekType: w.weekType ?? "accumulation",
         days: w.days.map((d) => ({
           dayNumber: d.dayNumber,
           name: d.name,
@@ -97,7 +102,7 @@ async function handleGetActiveProgram(uid: string): Promise<ActionResult> {
           })),
         })),
       })),
-      currentWeekNumber: currentWeek?.weekNumber ?? 1,
+      currentWeekNumber: currentWeekNum,
     },
   };
 }
@@ -149,17 +154,22 @@ async function handleSwapExercise(
     preview: { exercises: preview },
     programId: program.id,
     execute: async () => {
-      // Deep clone weeks and apply change
-      const updatedWeeks = structuredClone(program.weeks);
-      const week = updatedWeeks.find((w) => w.weekNumber === weekNum)!;
-      const day = week.days.find((d) => d.dayNumber === dayNum)!;
-      day.exercises[found.exerciseIndex] = {
+      // Re-fetch to avoid stale closure overwriting concurrent edits
+      const fresh = await getActiveProgramDoc(uid);
+      if (!fresh) throw new Error("Program not found");
+      const updatedWeeks = structuredClone(fresh.weeks);
+      const week = updatedWeeks.find((w) => w.weekNumber === weekNum);
+      const day = week?.days.find((d) => d.dayNumber === dayNum);
+      if (!week || !day) throw new Error(`Day ${dayNum} in week ${weekNum} not found`);
+      const idx = day.exercises.findIndex((e) => e.name.toLowerCase() === exerciseName.toLowerCase());
+      if (idx === -1) throw new Error(`Exercise "${exerciseName}" not found`);
+      day.exercises[idx] = {
         name: newExerciseName,
         sets: newSets,
         reps: newReps,
         rest: newRest,
       };
-      await updateDocument(`users/${uid}/programs/${program.id}`, {
+      await updateDocument(`users/${uid}/programs/${fresh.id}`, {
         weeks: updatedWeeks,
       });
     },
@@ -209,16 +219,16 @@ async function handleAdjustVolume(
     preview: { exercises: preview },
     programId: program.id,
     execute: async () => {
-      const updatedWeeks = structuredClone(program.weeks);
-      const week = updatedWeeks.find((w) => w.weekNumber === weekNum)!;
-      const day = week.days.find((d) => d.dayNumber === dayNum)!;
-      day.exercises[found.exerciseIndex] = {
-        ...day.exercises[found.exerciseIndex],
-        sets: newSets,
-        reps: newReps,
-        rest: newRest,
-      };
-      await updateDocument(`users/${uid}/programs/${program.id}`, {
+      const fresh = await getActiveProgramDoc(uid);
+      if (!fresh) throw new Error("Program not found");
+      const updatedWeeks = structuredClone(fresh.weeks);
+      const week = updatedWeeks.find((w) => w.weekNumber === weekNum);
+      const day = week?.days.find((d) => d.dayNumber === dayNum);
+      if (!week || !day) throw new Error(`Day ${dayNum} in week ${weekNum} not found`);
+      const idx = day.exercises.findIndex((e) => e.name.toLowerCase() === exerciseName.toLowerCase());
+      if (idx === -1) throw new Error(`Exercise "${exerciseName}" not found`);
+      day.exercises[idx] = { ...day.exercises[idx], sets: newSets, reps: newReps, rest: newRest };
+      await updateDocument(`users/${uid}/programs/${fresh.id}`, {
         weeks: updatedWeeks,
       });
     },
@@ -265,13 +275,16 @@ async function handleSkipWorkoutDay(
     preview: { exercises: preview },
     programId: program.id,
     execute: async () => {
-      const updatedWeeks = structuredClone(program.weeks);
-      const w = updatedWeeks.find((w) => w.weekNumber === weekNum)!;
-      const d = w.days.find((d) => d.dayNumber === dayNum)!;
+      const fresh = await getActiveProgramDoc(uid);
+      if (!fresh) throw new Error("Program not found");
+      const updatedWeeks = structuredClone(fresh.weeks);
+      const w = updatedWeeks.find((w) => w.weekNumber === weekNum);
+      const d = w?.days.find((d) => d.dayNumber === dayNum);
+      if (!w || !d) throw new Error(`Day ${dayNum} in week ${weekNum} not found`);
       d.exercises = [];
       (d as WorkoutDay & { skipped?: boolean; skipReason?: string }).skipped = true;
       (d as WorkoutDay & { skipReason?: string }).skipReason = reason;
-      await updateDocument(`users/${uid}/programs/${program.id}`, {
+      await updateDocument(`users/${uid}/programs/${fresh.id}`, {
         weeks: updatedWeeks,
       });
     },
@@ -317,16 +330,18 @@ async function handleRegenerateDay(
     preview: { exercises: preview },
     programId: program.id,
     execute: async () => {
-      // Load personalization so generated exercises respect equipment/constraints
       const personalization = await getDocument<PersonalizationData>(`users/${uid}/personalization/data`);
       const { generateDay } = await import("./programGenerator");
       const newExercises = await generateDay(focus, exerciseCount, personalization ?? undefined);
-      const updatedWeeks = structuredClone(program.weeks);
-      const w = updatedWeeks.find((w) => w.weekNumber === weekNum)!;
-      const d = w.days.find((d) => d.dayNumber === dayNum)!;
+      const fresh = await getActiveProgramDoc(uid);
+      if (!fresh) throw new Error("Program not found");
+      const updatedWeeks = structuredClone(fresh.weeks);
+      const w = updatedWeeks.find((w) => w.weekNumber === weekNum);
+      const d = w?.days.find((d) => d.dayNumber === dayNum);
+      if (!w || !d) throw new Error(`Day ${dayNum} in week ${weekNum} not found`);
       d.name = focus.charAt(0).toUpperCase() + focus.slice(1);
       d.exercises = newExercises;
-      await updateDocument(`users/${uid}/programs/${program.id}`, {
+      await updateDocument(`users/${uid}/programs/${fresh.id}`, {
         weeks: updatedWeeks,
       });
     },
@@ -369,14 +384,17 @@ async function handleRegenerateWeek(
     preview: { exercises: allExercises },
     programId: program.id,
     execute: async () => {
-      // Load personalization so generated exercises respect equipment/constraints
       const personalization = await getDocument<PersonalizationData>(`users/${uid}/personalization/data`);
       const { generateWeek } = await import("./programGenerator");
-      const newDays = await generateWeek(weekNum, week.days.length, focus, personalization ?? undefined);
-      const updatedWeeks = structuredClone(program.weeks);
-      const w = updatedWeeks.find((w) => w.weekNumber === weekNum)!;
+      const dayCount = week.days.length;
+      const newDays = await generateWeek(weekNum, dayCount, focus, personalization ?? undefined);
+      const fresh = await getActiveProgramDoc(uid);
+      if (!fresh) throw new Error("Program not found");
+      const updatedWeeks = structuredClone(fresh.weeks);
+      const w = updatedWeeks.find((w) => w.weekNumber === weekNum);
+      if (!w) throw new Error(`Week ${weekNum} not found`);
       w.days = newDays;
-      await updateDocument(`users/${uid}/programs/${program.id}`, {
+      await updateDocument(`users/${uid}/programs/${fresh.id}`, {
         weeks: updatedWeeks,
       });
     },
@@ -398,6 +416,9 @@ async function handleGenerateDeloadWeek(
   const week = program.weeks.find((w) => w.weekNumber === weekNum);
   if (!week) {
     return { type: "data", data: { error: `Week ${weekNum} not found.` } };
+  }
+  if (week.weekType === "deload") {
+    return { type: "data", data: { error: `Week ${weekNum} is already a deload week.` } };
   }
 
   // Build deload: reduce sets by ~40%, keep same exercises
@@ -423,10 +444,20 @@ async function handleGenerateDeloadWeek(
     preview: { exercises: allExercises },
     programId: program.id,
     execute: async () => {
-      const updatedWeeks = structuredClone(program.weeks);
-      const w = updatedWeeks.find((w) => w.weekNumber === weekNum)!;
-      w.days = deloadDays;
-      await updateDocument(`users/${uid}/programs/${program.id}`, {
+      const fresh = await getActiveProgramDoc(uid);
+      if (!fresh) throw new Error("Program not found");
+      const updatedWeeks = structuredClone(fresh.weeks);
+      const w = updatedWeeks.find((w) => w.weekNumber === weekNum);
+      if (!w) throw new Error(`Week ${weekNum} not found`);
+      // Rebuild deload from fresh data
+      w.days = w.days.map((day) => ({
+        ...day,
+        exercises: day.exercises.map((ex) => ({
+          ...ex,
+          sets: Math.max(2, Math.ceil(ex.sets * 0.6)),
+        })),
+      }));
+      await updateDocument(`users/${uid}/programs/${fresh.id}`, {
         weeks: updatedWeeks,
       });
     },
@@ -449,7 +480,7 @@ async function handleGetRecentPerformance(
     workoutName: string;
   }>(
     `users/${uid}/workoutLogs`,
-    [orderBy("completedAt", "desc"), limit(50)]
+    [orderBy("completedAt", "desc"), limit(Math.min(queryLimit * 5, 25))]
   );
 
   // Filter logs that contain the requested exercise (case-insensitive)
@@ -518,8 +549,280 @@ async function handleGetRecentPerformance(
 }
 
 // ============================================================
+// Surgical Exercise Operations (add, remove, reorder)
+// ============================================================
+
+async function handleAddExercise(
+  uid: string,
+  args: Record<string, unknown>
+): Promise<ActionResult> {
+  const program = await getActiveProgramDoc(uid);
+  if (!program) return { type: "data", data: { error: "No active program found." } };
+
+  const weekNum = args.weekNumber as number;
+  const dayNum = args.dayNumber as number;
+  const name = args.exerciseName as string;
+  const sets = (args.sets as number) || 3;
+  const reps = (args.reps as string) || "10";
+  const rest = (args.rest as string) || "60s";
+
+  const week = program.weeks.find((w) => w.weekNumber === weekNum);
+  const day = week?.days.find((d) => d.dayNumber === dayNum);
+  if (!week || !day) return { type: "data", data: { error: `Day ${dayNum} in week ${weekNum} not found.` } };
+  // Prevent duplicate exercises on the same day
+  if (day.exercises.some(e => e.name.toLowerCase() === name.toLowerCase())) {
+    return { type: "data", data: { error: `"${name}" is already on Day ${dayNum}. Use adjustVolume to change sets/reps, or swapExercise to replace it.` } };
+  }
+
+  const newExercise: Exercise = { name, sets, reps, rest };
+  const preview: ExercisePreview[] = [...day.exercises, { ...newExercise, changed: true }];
+
+  return {
+    type: "proposal",
+    proposal: {
+      actionName: "addExercise",
+      description: `Add "${name}" (${sets}x${reps}, ${rest}) to Week ${weekNum}, Day ${dayNum}`,
+      preview: { exercises: preview },
+      programId: program.id,
+      execute: async () => {
+        const fresh = await getActiveProgramDoc(uid);
+        if (!fresh) throw new Error("Program not found");
+        const updatedWeeks = structuredClone(fresh.weeks);
+        const w = updatedWeeks.find((w) => w.weekNumber === weekNum);
+        const d = w?.days.find((d) => d.dayNumber === dayNum);
+        if (!w || !d) throw new Error(`Day ${dayNum} in week ${weekNum} not found`);
+        d.exercises.push(newExercise);
+        await updateDocument(`users/${uid}/programs/${fresh.id}`, { weeks: updatedWeeks });
+      },
+    },
+  };
+}
+
+async function handleRemoveExercise(
+  uid: string,
+  args: Record<string, unknown>
+): Promise<ActionResult> {
+  const program = await getActiveProgramDoc(uid);
+  if (!program) return { type: "data", data: { error: "No active program found." } };
+
+  const weekNum = args.weekNumber as number;
+  const dayNum = args.dayNumber as number;
+  const exerciseName = args.exerciseName as string;
+
+  const found = findExercise(program, weekNum, dayNum, exerciseName);
+  if (!found) return { type: "data", data: { error: `Exercise "${exerciseName}" not found in week ${weekNum}, day ${dayNum}.` } };
+  if (found.day.exercises.length <= 1) return { type: "data", data: { error: `Cannot remove the only exercise on Day ${dayNum}. Use skipWorkoutDay to skip the day, or swapExercise to replace it.` } };
+
+  const preview: ExercisePreview[] = found.day.exercises
+    .filter((_, i) => i !== found.exerciseIndex)
+    .map((e) => ({ ...e }));
+
+  return {
+    type: "proposal",
+    proposal: {
+      actionName: "removeExercise",
+      description: `Remove "${exerciseName}" from Week ${weekNum}, Day ${dayNum}`,
+      preview: { exercises: preview },
+      programId: program.id,
+      execute: async () => {
+        const fresh = await getActiveProgramDoc(uid);
+        if (!fresh) throw new Error("Program not found");
+        const updatedWeeks = structuredClone(fresh.weeks);
+        const w = updatedWeeks.find((w) => w.weekNumber === weekNum);
+        const d = w?.days.find((d) => d.dayNumber === dayNum);
+        if (!w || !d) throw new Error(`Day ${dayNum} in week ${weekNum} not found`);
+        const idx = d.exercises.findIndex((e) => e.name.toLowerCase() === exerciseName.toLowerCase());
+        if (idx === -1) throw new Error(`Exercise "${exerciseName}" not found`);
+        d.exercises.splice(idx, 1);
+        await updateDocument(`users/${uid}/programs/${fresh.id}`, { weeks: updatedWeeks });
+      },
+    },
+  };
+}
+
+// ============================================================
+// Workout History (general — no exercise filter)
+// ============================================================
+
+async function handleGetWorkoutHistory(
+  uid: string,
+  args: Record<string, unknown>
+): Promise<ActionResult> {
+  const count = (args.limit as number) || 10;
+  const logs = await queryCollection<{
+    workoutName: string;
+    exercises: { name: string }[];
+    completedAt: string;
+    completionType: string;
+    totalVolume?: number;
+    duration?: number;
+    isActivity?: boolean;
+    durationMinutes?: number;
+    distance?: string;
+  }>(
+    `users/${uid}/workoutLogs`,
+    [orderBy("completedAt", "desc"), limit(count)]
+  );
+
+  if (logs.length === 0) {
+    return { type: "data", data: { found: false, message: "No workout history found." } };
+  }
+
+  return {
+    type: "data",
+    data: {
+      found: true,
+      totalLogs: logs.length,
+      workouts: logs.map((l) => ({
+        name: l.workoutName,
+        date: new Date(l.completedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+        completionType: l.completionType,
+        exerciseCount: l.exercises?.length ?? 0,
+        exercises: l.exercises?.map((e) => e.name) ?? [],
+        totalVolume: l.totalVolume ?? 0,
+        duration: l.isActivity ? l.durationMinutes : l.duration ? Math.round(l.duration / 60) : 0,
+        isActivity: l.isActivity ?? false,
+        distance: l.distance ?? "",
+      })),
+    },
+  };
+}
+
+// ============================================================
+// Quick Activity Log (run, walk, bike, swim, etc.)
+// ============================================================
+
+async function handleLogActivity(
+  uid: string,
+  args: Record<string, unknown>
+): Promise<ActionResult> {
+  const activity = (args.activity as string) || "Activity";
+  const duration = (args.durationMinutes as number) || 0;
+  const distance = (args.distance as string) || "";
+  const notes = (args.notes as string) || "";
+
+  const now = new Date();
+  const logId = `activity_${now.getTime()}`;
+  const completedAt = toLocalISO(now);
+
+  await setDocument(`users/${uid}/workoutLogs/${logId}`, {
+    workoutName: activity,
+    exercises: [],
+    completedAt,
+    completionType: "full",
+    isActivity: true,
+    durationMinutes: duration,
+    distance,
+    notes,
+  }, false);
+
+  // Update behavior state: activities count as training effort for streaks & consistency
+  const { recordWorkoutCompleted, getBehaviorState } = await import("../app/utils/behaviorStore");
+  const updatedState = recordWorkoutCompleted();
+
+  // Sync challenge progress + send notification
+  const { syncChallengeProgress } = await import("./challenges");
+  const { notifyWorkoutComplete } = await import("./notifications");
+  syncChallengeProgress(uid, updatedState).catch(() => {});
+  notifyWorkoutComplete(uid, activity, duration * 60).catch(() => {});
+
+  return {
+    type: "data",
+    data: {
+      logged: true,
+      activity,
+      duration,
+      distance,
+      message: `Logged: ${activity}${distance ? ` — ${distance}` : ""}${duration ? ` — ${duration}min` : ""}. Stored in your training history.`,
+    },
+  };
+}
+
+// ============================================================
+// Load Day Workout (do another day's session today)
+// ============================================================
+
+async function handleLoadDayWorkout(
+  uid: string,
+  args: Record<string, unknown>
+): Promise<ActionResult> {
+  const program = await getActiveProgramDoc(uid);
+  if (!program) {
+    return { type: "data", data: { error: "No active program found." } };
+  }
+
+  const dayNum = args.dayNumber as number;
+  const weekNum = (args.weekNumber as number) || getCurrentProgramWeek(program.createdAt, program.weeks.length);
+
+  const week = program.weeks.find((w) => w.weekNumber === weekNum);
+  if (!week) {
+    return { type: "data", data: { error: `Week ${weekNum} not found.` } };
+  }
+
+  const day = week.days.find((d) => d.dayNumber === dayNum);
+  if (!day) {
+    return { type: "data", data: { error: `Day ${dayNum} not found in week ${weekNum}.` } };
+  }
+
+  // Return as a bonus workout payload — UI will offer to start it immediately
+  return {
+    type: "data",
+    data: {
+      bonusWorkout: {
+        dayNumber: day.dayNumber,
+        name: `${day.name} (Day ${dayNum})`,
+        exercises: day.exercises,
+      },
+      message: `Loaded Day ${dayNum} — ${day.name} (${day.exercises.length} exercises). Ready to start.`,
+    },
+  };
+}
+
+// ============================================================
+// Bonus (Ad-Hoc) Workout Generation
+// ============================================================
+
+async function handleGenerateBonusWorkout(
+  uid: string,
+  args: Record<string, unknown>
+): Promise<ActionResult> {
+  const focus = (args.focus as string) || "general";
+  const exerciseCount = (args.exerciseCount as number) || 4;
+  const customInstructions = (args.customInstructions as string) || "";
+
+  const personalization = await getDocument<PersonalizationData>(`users/${uid}/personalization/data`);
+  const { generateDay } = await import("./programGenerator");
+  const exercises = await generateDay(
+    customInstructions ? `${focus}. ${customInstructions}` : focus,
+    exerciseCount,
+    personalization ?? undefined
+  );
+
+  // Return as a bonus workout payload — the UI will offer to start it immediately
+  return {
+    type: "data",
+    data: {
+      bonusWorkout: {
+        dayNumber: 0,
+        name: `Bonus ${focus.charAt(0).toUpperCase() + focus.slice(1)} Calibration`,
+        exercises,
+      },
+      message: `Generated a ${exerciseCount}-exercise ${focus} workout. Ready to start when you are.`,
+    },
+  };
+}
+
+// ============================================================
 // Main Dispatcher
 // ============================================================
+
+/** All known agent tool names — shared with AIAgent for text-call detection */
+export const AGENT_TOOL_NAMES = [
+  "getActiveProgram", "swapExercise", "adjustVolume", "skipWorkoutDay",
+  "regenerateDay", "regenerateWeek", "generateDeloadWeek", "getRecentPerformance",
+  "getWorkoutHistory", "addExercise", "removeExercise", "generateBonusWorkout",
+  "loadDayWorkout", "logActivity",
+] as const;
 
 /** Normalize snake_case to camelCase (Gemini sometimes returns snake_case names) */
 function toCamelCase(name: string): string {
@@ -536,27 +839,44 @@ export async function executeAction(
 ): Promise<ActionResult> {
   const normalized = toCamelCase(functionName);
 
+  let result: ActionResult;
   switch (normalized) {
     case "getActiveProgram":
-      return handleGetActiveProgram(uid);
+      result = await handleGetActiveProgram(uid); break;
     case "swapExercise":
-      return handleSwapExercise(uid, args);
+      result = await handleSwapExercise(uid, args); break;
     case "adjustVolume":
-      return handleAdjustVolume(uid, args);
+      result = await handleAdjustVolume(uid, args); break;
     case "skipWorkoutDay":
-      return handleSkipWorkoutDay(uid, args);
+      result = await handleSkipWorkoutDay(uid, args); break;
     case "regenerateDay":
-      return handleRegenerateDay(uid, args);
+      result = await handleRegenerateDay(uid, args); break;
     case "regenerateWeek":
-      return handleRegenerateWeek(uid, args);
+      result = await handleRegenerateWeek(uid, args); break;
     case "generateDeloadWeek":
-      return handleGenerateDeloadWeek(uid, args);
+      result = await handleGenerateDeloadWeek(uid, args); break;
     case "getRecentPerformance":
-      return handleGetRecentPerformance(uid, args);
+      result = await handleGetRecentPerformance(uid, args); break;
+    case "getWorkoutHistory":
+      result = await handleGetWorkoutHistory(uid, args); break;
+    case "addExercise":
+      result = await handleAddExercise(uid, args); break;
+    case "removeExercise":
+      result = await handleRemoveExercise(uid, args); break;
+    case "generateBonusWorkout":
+      result = await handleGenerateBonusWorkout(uid, args); break;
+    case "loadDayWorkout":
+      result = await handleLoadDayWorkout(uid, args); break;
+    case "logActivity":
+      result = await handleLogActivity(uid, args); break;
     default:
-      return {
-        type: "data",
-        data: { error: `Unknown action: ${functionName}` },
-      };
+      return { type: "data", data: { error: `Unknown action: ${functionName}` } };
   }
+
+  // Attach original function name to proposals (Gemini expects it in functionResponse)
+  if (result.type === "proposal" && functionName !== normalized) {
+    result.proposal.originalName = functionName;
+  }
+
+  return result;
 }

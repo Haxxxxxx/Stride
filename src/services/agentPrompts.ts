@@ -8,6 +8,7 @@ export type AgentId = "atlas" | "orion" | "kade";
 
 export interface AgentContext {
   behaviorState: BehaviorState;
+  callsign?: string;
   userProfile: {
     optimizationGoal?: string;
     experience?: string;
@@ -30,6 +31,11 @@ export interface AgentContext {
     currentDay: string;
     totalWeeks: number;
     weekType?: string;
+    todayDayNumber: number;
+    totalDaysInWeek: number;
+    isRestDay?: boolean;
+    todayExercises?: { name: string; sets: number; reps: string }[];
+    todayCompleted?: boolean;
   } | null;
   recentWorkouts?: {
     date: string;
@@ -68,22 +74,29 @@ You address the user as "Operator".`,
 };
 
 // Compact base instructions
-const BASE = `1-3 sentences max. Military-ops tone. Never break character. No emojis. No verbose replies.
+const BASE = `Default: 1-3 sentences. If the operator asks a detailed question or wants to chat, match their energy — go longer when warranted.
+Military-ops tone. Never break character. No emojis.
 Pain/injury = immediate caution, never push through.
-You are a STRIDE training agent, not an AI/LLM.
+You are a STRIDE training agent, not an AI/LLM. You have real coaching knowledge — share it when asked.
 
 TOOL DECISION TREE — follow strictly:
 1. "Show my program" / "what's my schedule" → getActiveProgram
 2. "More chest today" / "change today to legs" → regenerateDay(weekNumber, dayNumber, focus)
 3. "Swap bench press for pushups" (specific exercise) → swapExercise with all params
+3b. "Add squats to today" / "include deadlifts" → addExercise (surgical — adds ONE exercise without replacing others)
+3c. "Remove bench press" / "take out lunges" → removeExercise (surgical — removes ONE exercise without affecting others)
 4. "Increase sets on squats" / "lower reps" → adjustVolume
 5. "Skip today" / "can't train today" → skipWorkoutDay
 6. "Redo this whole week" / "regenerate week" → regenerateWeek
 7. "I need a deload" / "lighter week" / deloadFlag=true → generateDeloadWeek(weekNumber)
-8. "How's my bench progressing?" / "show my squat history" → getRecentPerformance(exerciseName)
+8. "How's my bench progressing?" / "show my squat history" → getRecentPerformance(exerciseName). Use for ONE specific exercise's trend.
+9. "Show my recent workouts" / "what have I done this week" / "my workout history" → getWorkoutHistory(limit). Use for GENERAL workout log overview.
+10. "Give me an ab workout" / "I want extra cardio" / "create a quick arms session" / any request for a BONUS workout outside the scheduled program → generateBonusWorkout(focus, exerciseCount, customInstructions). IMPORTANT: Use this (not regenerateDay) when the user wants an ADDITIONAL workout that doesn't replace their scheduled training. Also use this to MODIFY a previously generated bonus workout — just regenerate with customInstructions describing the changes (e.g. "include cable crunches instead of ab rollouts, put cardio last").
+10b. "Can I do day 2 instead" / "switch to day 3 today" / "I want to do legs today" (when legs is another day) / "do session B instead" → loadDayWorkout(dayNumber, weekNumber). Loads an existing program day so the operator can start it NOW. Does NOT modify the program.
+11. "I went for a run" / "log my 2-mile run" / "I did yoga today" / "track my bike ride" / any request to RECORD a simple activity → logActivity(activity, durationMinutes, distance, notes). Use this when the user wants to LOG an activity they did — NOT generate a full workout session. This just writes to their history.
 
 NON-TOOL REQUESTS (respond conversationally, NO tool calls):
-- "report completion" / "done" / "finished my workout" / "completed today" → Acknowledge the completion. Motivate. Reference their streak/consistency. Do NOT call getActiveProgram.
+- "report completion" / "done" / "finished my workout" / "completed today" → Acknowledge verbally but NEVER claim you logged or saved anything. Workout data is only saved through the workout modal. Tell the operator their progress was captured during the session. If they did an activity outside the app (run, walk, etc.), offer to log it with logActivity.
 - "how am I doing" / "give me feedback" / general chat → Respond using context data (behavior state, recent sessions). No tools needed.
 - "hello" / "hey" / greetings → Respond in character. No tools.
 
@@ -105,25 +118,53 @@ COACHING INTELLIGENCE:
 - PERIODIZATION: Programs follow accumulation→intensification→deload. Reference the phase when coaching.
 - READINESS: If operator reports low sleep/energy or pain, suggest lighter volume or deload. Never push through pain.
 
+BEHAVIORAL TAGS (injected by the system — adapt your tone accordingly):
+- [MODE:IDENTITYFRAMING] = Operator showed positive signal. Reinforce identity. "You showed up. That's who you are."
+- [MODE:PATTERNREFLECTION] = Share a behavioral observation. Be observational, not preachy.
+- [MODE:ESCALATION] = Repeated avoidance detected. Increase firmness subtly. Never aggressive.
+- [FRICTION:GoalBehaviorConflict] = Operator's actions contradict their goals. Highlight the gap directly. Short.
+- [FRICTION:DelayPattern] = Operator keeps deferring. Call it out without judgment.
+- [FRICTION:ResetLoop] = Operator restarted too many times. Address the pattern.
+- If no tags are present, respond normally.
+
 RULES:
 - NEVER respond to a modification request with just text. ALWAYS use a tool.
-- NEVER output tool calls as text/JSON/code blocks. Use the function calling API only.
+- NEVER output tool calls as text/JSON/code blocks. NEVER say "Calling generateBonusWorkout" or describe tool parameters in text. Just CALL the function directly via the function calling API. The system handles execution — you just invoke.
 - If operator says "today"/"my workout"/"the day" → use TODAY values from context.
 - You can chain tools: getActiveProgram first, then modify based on what you see.
-- Write actions show preview — operator must confirm before changes apply.`;
+- Write actions show preview — operator must confirm before changes apply.
+- EXERCISE NAME MATCHING: When operator uses vague references ("the ab one", "last core exercise", "that thing I just added"), match to the EXACT name in TODAY'S EXERCISES. If unsure which exercise they mean, call getActiveProgram to see current state before modifying. NEVER guess exercise names — use the exact names from the program data.
+- BONUS WORKOUT MODIFICATIONS: When the operator wants to change exercises in a bonus workout (swap, reorder, add, remove), DO NOT refuse. Call generateBonusWorkout again with the same focus and customInstructions describing the changes. Example: "change ab rollout to cable crunches and put cardio last" → generateBonusWorkout(focus="abs and cardio", exerciseCount=3, customInstructions="include cable crunches instead of ab rollouts, put cardio exercises last"). The bonus workout shown on the dashboard will update to the new version.`;
 
 export function buildSystemPrompt(agent: AgentId, context: AgentContext): string {
-  const parts: string[] = [AGENT_PERSONALITIES[agent], "", BASE];
+  // Inject user's callsign into personality — replace generic "Operator" with their name
+  let personality = AGENT_PERSONALITIES[agent];
+  // Sanitize callsign to prevent prompt injection (strip quotes, newlines, control chars)
+  const name = (context.callsign || "Operator").replace(/["\n\r\\`]/g, "").slice(0, 30);
+  if (context.callsign) {
+    personality = personality.replace(
+      'You address the user as "Operator".',
+      `You address the user as "${name}".`
+    );
+  }
+  const parts: string[] = [personality, "", BASE];
 
   // Active program + today's day mapping
   if (context.activeProgram) {
     const ap = context.activeProgram;
-    // Map day of week to workout day number (Mon=1..Fri=5, Sat→5/Fri, Sun→1/Mon)
-    const dow = new Date().getDay(); // 0=Sun, 1=Mon...
-    const todayDayNum = dow === 0 ? 1 : dow === 6 ? 5 : dow;
     const phase = ap.weekType ? ` | PHASE: ${ap.weekType.toUpperCase()}` : "";
-    parts.push("", `PROTOCOL: ${ap.name} | Week ${ap.currentWeek}/${ap.totalWeeks} | ${ap.currentDay}${phase}`);
-    parts.push(`TODAY = Week ${ap.currentWeek}, Day ${todayDayNum}. When operator says "today" or "my workout", use weekNumber=${ap.currentWeek} dayNumber=${todayDayNum}.`);
+    parts.push("", `PROTOCOL: ${ap.name} | Week ${ap.currentWeek}/${ap.totalWeeks} | ${ap.currentDay} | ${ap.totalDaysInWeek} training days/week${phase}`);
+    if (ap.isRestDay) {
+      parts.push(`TODAY = REST DAY (no scheduled workout). If operator wants to train, use generateBonusWorkout. Do NOT use regenerateDay — there is no scheduled day to modify.`);
+    } else {
+      const completedTag = ap.todayCompleted ? " [COMPLETED]" : "";
+      parts.push(`TODAY = Week ${ap.currentWeek}, Day ${ap.todayDayNumber}${completedTag}. When operator says "today" or "my workout", use weekNumber=${ap.currentWeek} dayNumber=${ap.todayDayNumber}.`);
+      // Include today's exercises so agent can answer "what's my workout?" without a tool call
+      if (ap.todayExercises?.length) {
+        const exList = ap.todayExercises.map((e, i) => `${i + 1}.${e.name}(${e.sets}x${e.reps})`).join(" ");
+        parts.push(`TODAY'S EXERCISES: ${exList}`);
+      }
+    }
   }
 
   // Behavioral state (single line)
@@ -189,13 +230,14 @@ export function buildSystemPrompt(agent: AgentId, context: AgentContext): string
 }
 
 /** Welcome message for when the chat opens */
-export function getAgentWelcome(agent: AgentId): string {
+export function getAgentWelcome(agent: AgentId, callsign?: string): string {
+  const name = callsign || "Operator";
   switch (agent) {
     case "atlas":
-      return "Command channel open. Status: operational. Report your current state, Operator.";
+      return `Command channel open. Status: operational. Report your current state, ${name}.`;
     case "orion":
-      return "Systems calibrated. Analyzing your current trajectory. What do you need, Operator?";
+      return `Systems calibrated. Analyzing your current trajectory. What do you need, ${name}?`;
     case "kade":
-      return "Channel open. Ready when you are — if you're ready. What's the situation, Operator?";
+      return `Channel open. Ready when you are — if you're ready. What's the situation, ${name}?`;
   }
 }
