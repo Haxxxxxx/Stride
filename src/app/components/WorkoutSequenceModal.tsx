@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { SystemMessage } from "./SystemMessage";
+import { Scanline } from "./Scanline";
 import { getRandomMessage, getPostWorkoutMessage } from "../utils/microLanguage";
 import {
   recordWorkoutOpened,
@@ -7,11 +8,15 @@ import {
   recordHesitation,
   recordWorkoutCompleted,
   recordReflection,
+  getBehaviorState,
+  updateBehaviorState,
 } from "../utils/behaviorStore";
 import { useAuth } from "../contexts/AuthContext";
 import { setDocument } from "../../services/firestore";
 import { notifyWorkoutComplete } from "../../services/notifications";
+import { syncChallengeProgress } from "../../services/challenges";
 import type { WorkoutDay, Exercise, ActualSetData, ExerciseLog, ReadinessData } from "../../services/programGenerator";
+import { toLocalISO } from "../utils/dateUtils";
 
 interface WorkoutSequenceModalProps {
   isOpen: boolean;
@@ -21,23 +26,101 @@ interface WorkoutSequenceModalProps {
 
 const MONO = "font-['JetBrains_Mono',monospace]";
 
+/** localStorage key for in-progress workout session */
+export const WIP_KEY = "stride_workout_wip";
+
+/** WIP sessions older than this are considered stale and discarded (2 hours) */
+export const WIP_EXPIRY_MS = 2 * 60 * 60 * 1000;
+
+/** Idle time before triggering a hesitation event (35 seconds) */
+const HESITATION_DELAY_MS = 35_000;
+
+export interface WorkoutWIP {
+  workoutName: string;
+  status: "readiness" | "active" | "setLog" | "resting" | "paused";
+  timer: number;
+  currentExerciseIdx: number;
+  currentSet: number;
+  exerciseLogs: ExerciseLog[];
+  currentSetData: ActualSetData[];
+  readiness: ReadinessData;
+  exerciseOrder: number[];
+  skippedExercises: number[];
+  savedAt: number; // Date.now() — to detect stale sessions
+  exerciseHash?: string; // fingerprint of exercise names — invalidates order if program changed
+  snapshotExercises?: Exercise[]; // full exercise list for resume
+}
+
+/** Simple hash of exercise names — detects program modifications between WIP save and restore */
+function exerciseFingerprint(exercises: { name: string }[]): string {
+  return exercises.map(e => e.name).join("|");
+}
+
+function saveWIP(data: Omit<WorkoutWIP, "savedAt">) {
+  try {
+    localStorage.setItem(WIP_KEY, JSON.stringify({ ...data, savedAt: Date.now() }));
+  } catch { /* quota exceeded — non-critical */ }
+}
+
+export function loadWIP(workoutName: string): WorkoutWIP | null {
+  try {
+    const raw = localStorage.getItem(WIP_KEY);
+    if (!raw) return null;
+    const wip: WorkoutWIP = JSON.parse(raw);
+    if (Date.now() - wip.savedAt > WIP_EXPIRY_MS) return null;
+    // Match by name — but also accept if the WIP is for the same day slot
+    // (program may have been renamed via regenerateDay since the WIP was saved)
+    if (wip.workoutName !== workoutName) return null;
+    return wip;
+  } catch { return null; }
+}
+
+/** Load any WIP regardless of workout name — for detecting stale/orphaned WIP */
+export function loadAnyWIP(): WorkoutWIP | null {
+  try {
+    const raw = localStorage.getItem(WIP_KEY);
+    if (!raw) return null;
+    const wip: WorkoutWIP = JSON.parse(raw);
+    if (Date.now() - wip.savedAt > WIP_EXPIRY_MS) return null;
+    return wip;
+  } catch { return null; }
+}
+
+export function clearWIP() {
+  localStorage.removeItem(WIP_KEY);
+}
+
 export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSequenceModalProps) {
   const { user } = useAuth();
   const [status, setStatus] = useState<
-    "initializing" | "ready" | "readiness" | "active" | "setLog" | "paused" | "complete" | "reflection" | "encoded"
+    "initializing" | "ready" | "readiness" | "active" | "setLog" | "resting" | "paused" | "transition" | "complete" | "reflection" | "encoded"
   >("initializing");
   const [timer, setTimer] = useState(0);
+  const [countdown, setCountdown] = useState<number | null>(null);
   const [currentExerciseIdx, setCurrentExerciseIdx] = useState(0);
   const [currentSet, setCurrentSet] = useState(1);
+  const [exerciseOrder, setExerciseOrder] = useState<number[]>([]);
+  const [skippedExercises, setSkippedExercises] = useState<number[]>([]);
+  // Exercises permanently removed from the workout (user chose "Skip Entirely" on a deferred exercise)
+  const [removedExercises, setRemovedExercises] = useState<number[]>([]);
+  // Snapshot exercises on open — prevents mid-workout shifts if the program is modified externally
+  const [snapshotExercises, setSnapshotExercises] = useState<Exercise[]>([]);
 
-  // Derive exercise data from props or fallback
-  const exercises: Exercise[] = (workoutDay?.exercises?.length ? workoutDay.exercises : null) ?? [
-    { name: "Sit Up", sets: 3, reps: "15", rest: "60s" },
-  ];
-  const currentExercise = exercises[currentExerciseIdx] ?? exercises[0];
+  // Use snapshot if available (active workout), otherwise derive from props
+  const exercises: Exercise[] = snapshotExercises.length > 0
+    ? snapshotExercises
+    : (workoutDay?.exercises?.length ? workoutDay.exercises : null) ?? [
+        { name: "Sit Up", sets: 3, reps: "15", rest: "60s" },
+      ];
+  // exerciseOrder maps position → exercises[] index. Fall back to identity mapping until initialized.
+  // Use exerciseOrder if set (length shrinks when exercises are removed — that's valid).
+  const resolvedOrder = exerciseOrder.length > 0 ? exerciseOrder : exercises.map((_, i) => i);
+  const currentExercise = exercises[resolvedOrder[currentExerciseIdx]] ?? exercises[0];
   const exerciseName = currentExercise?.name ?? "Exercise";
   const targetSets = currentExercise?.sets ?? 3;
-  const targetReps = parseInt(String(currentExercise?.reps ?? "15"), 10) || 15;
+  const rawReps = String(currentExercise?.reps ?? "15");
+  const isTimed = /s\b/.test(rawReps); // e.g. "30s", "45s", "30s each"
+  const targetReps = parseInt(rawReps, 10) || 15;
   const workoutName = workoutDay?.name ?? "Workout";
 
   // ============================================================
@@ -60,6 +143,10 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
   const [setForm, setSetForm] = useState<number>(3); // 1=rough, 3=ok, 5=clean
   const [setPain, setSetPain] = useState<ActualSetData["pain"]>("none");
   const [currentSetData, setCurrentSetData] = useState<ActualSetData[]>([]);
+  const [restCountdown, setRestCountdown] = useState<number | null>(null);
+
+  // Parsed rest period for the current exercise (e.g. "60s" → 60)
+  const restSeconds = parseInt(currentExercise?.rest ?? "60", 10) || 60;
 
   // Micro-language state
   const [startMessage, setStartMessage] = useState("");
@@ -75,6 +162,19 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
   const completionDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [increasedIntensity] = useState(false);
 
+  // Debounce rapid skip taps to prevent stale-state race conditions
+  const skipLockRef = useRef(false);
+
+  // When true, unmount cleanup should NOT re-save WIP (session was intentionally ended)
+  const wipFinishedRef = useRef(false);
+
+  // Track if modal is still active to prevent stale timeout writes
+  const isActiveRef = useRef(false);
+  useEffect(() => {
+    isActiveRef.current = isOpen;
+    return () => { isActiveRef.current = false; };
+  }, [isOpen]);
+
   const clearHesitationTimer = useCallback(() => {
     if (hesitationTimerRef.current) {
       clearTimeout(hesitationTimerRef.current);
@@ -82,8 +182,173 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     }
   }, []);
 
+  // Stable ref for timer — prevents handleCloseWithSave from recreating every second
+  const timerRef = useRef(timer);
+  useEffect(() => { timerRef.current = timer; }, [timer]);
+
+  // Refs for latest WIP state — used by unmount/beforeunload to save without stale closures
+  const wipStateRef = useRef({ status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, exercises });
+  useEffect(() => {
+    wipStateRef.current = { status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, exercises };
+  });
+
+  // Save WIP on unmount (e.g. user navigates away mid-workout) + beforeunload
+  useEffect(() => {
+    const saveOnExit = () => {
+      if (wipFinishedRef.current) return; // Session was intentionally ended — don't re-save
+      const s = wipStateRef.current;
+      if (["readiness", "active", "setLog", "resting", "paused", "transition"].includes(s.status)) {
+        saveWIP({
+          workoutName: s.workoutName,
+          status: (s.status === "transition" || s.status === "resting" ? "active" : s.status) as WorkoutWIP["status"],
+          timer: timerRef.current,
+          currentExerciseIdx: s.currentExerciseIdx,
+          currentSet: s.currentSet,
+          exerciseLogs: s.exerciseLogs,
+          currentSetData: s.currentSetData,
+          readiness: s.readiness,
+          exerciseOrder: s.resolvedOrder,
+          skippedExercises: s.skippedExercises,
+          exerciseHash: exerciseFingerprint(s.exercises),
+          snapshotExercises: s.exercises,
+        });
+      }
+    };
+    window.addEventListener("beforeunload", saveOnExit);
+    return () => {
+      window.removeEventListener("beforeunload", saveOnExit);
+      // Component unmounting (navigation) — save if workout in progress
+      saveOnExit();
+    };
+  }, []); // empty deps — runs once, uses refs for latest values
+
+  // ============================================================
+  // Save WIP on close (when workout is in progress)
+  // ============================================================
+  const handleCloseWithSave = useCallback(() => {
+    if (["readiness", "active", "setLog", "resting", "paused", "transition"].includes(status)) {
+      saveWIP({
+        workoutName,
+        status: (status === "transition" || status === "resting" ? "active" : status) as WorkoutWIP["status"],
+        timer: timerRef.current,
+        currentExerciseIdx,
+        currentSet,
+        exerciseLogs,
+        currentSetData,
+        readiness,
+        exerciseOrder: resolvedOrder,
+        skippedExercises,
+        exerciseHash: exerciseFingerprint(exercises),
+        snapshotExercises: exercises,
+      });
+    }
+    onClose();
+  }, [status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, exercises, onClose]);
+
+  // Escape key — save WIP and close
+  useEffect(() => {
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === "Escape") handleCloseWithSave(); };
+    if (isOpen) document.addEventListener("keydown", handleEsc);
+    return () => document.removeEventListener("keydown", handleEsc);
+  }, [isOpen, handleCloseWithSave]);
+
   useEffect(() => {
     if (isOpen) {
+      wipFinishedRef.current = false; // Reset — new session starting
+      // Check for saved in-progress session
+      const wip = loadWIP(workoutName);
+      // Snapshot exercises on open — prevents prop changes from shifting workout mid-session
+      const currentExercises = (workoutDay?.exercises?.length ? workoutDay.exercises : null) ?? [{ name: "Sit Up", sets: 3, reps: "15", rest: "60s" }];
+      setSnapshotExercises([...currentExercises]);
+
+      if (wip) {
+        // Check if program was modified since WIP was saved (exercise names changed)
+        const currentHash = exerciseFingerprint(currentExercises);
+        const programChanged = wip.exerciseHash && wip.exerciseHash !== currentHash;
+        if (programChanged) {
+          // Program was modified mid-workout — preserve progress, apply new exercises
+          // Keep timer, completed logs, and readiness; resume from first non-completed exercise
+          const completedNames = new Set(wip.exerciseLogs.map(l => l.name.toLowerCase()));
+          let resumeIdx = -1;
+          for (let i = 0; i < currentExercises.length; i++) {
+            if (!completedNames.has(currentExercises[i].name.toLowerCase())) {
+              resumeIdx = i;
+              break;
+            }
+          }
+          if (resumeIdx === -1) {
+            // All exercises were completed before program changed — save and close
+            clearWIP(); wipFinishedRef.current = true;
+            // Save workout log directly (handleComplete has stale closures in useEffect)
+            if (wip.exerciseLogs.length > 0 && user) {
+              const totalVolume = wip.exerciseLogs.reduce((sum, ex) =>
+                sum + ex.actualSets.reduce((s, set) => s + set.weight * set.repsCompleted, 0), 0);
+              const totalSetsCount = wip.exerciseLogs.reduce((sum, ex) => sum + ex.actualSets.length, 0);
+              const totalRPE = wip.exerciseLogs.reduce((sum, ex) =>
+                sum + ex.actualSets.reduce((s, set) => s + set.rpe, 0), 0);
+              const logId = `log_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+              setDocument(`users/${user.uid}/workoutLogs/${logId}`, {
+                workoutName,
+                exercises: wip.exerciseLogs,
+                duration: wip.timer,
+                completedAt: toLocalISO(new Date()),
+                completionType: "full",
+                readiness: wip.readiness,
+                totalVolume,
+                avgRPE: totalSetsCount > 0 ? Math.round(totalRPE / totalSetsCount * 10) / 10 : 0,
+              }).catch(console.warn);
+              recordWorkoutCompleted();
+              syncChallengeProgress(user.uid, getBehaviorState()).catch(console.warn);
+              notifyWorkoutComplete(user.uid, workoutName, wip.timer).catch(console.warn);
+            }
+            onClose();
+            return;
+          }
+          setStatus(wip.status === "setLog" ? "active" : wip.status);
+          setTimer(wip.timer);
+          setCurrentExerciseIdx(resumeIdx);
+          setCurrentSet(1);
+          setExerciseLogs(wip.exerciseLogs);
+          setCurrentSetData([]);
+          setReadiness(wip.readiness);
+          setExerciseOrder(currentExercises.map((_, i) => i));
+          setSkippedExercises([]); // Reset — old indices are invalid
+          setRemovedExercises([]);
+          hasStartedRef.current = true;
+          setStartMessage("");
+          setHesitationMessage("");
+          setCompletionMessage("");
+          setNeuroplasticMessage("");
+          setReflectionText("");
+          setShowHesitation(false);
+          clearWIP();
+          return;
+        } else {
+          // Restore saved session
+          setStatus(wip.status === "setLog" ? "active" : wip.status);
+          setTimer(wip.timer);
+          setCurrentExerciseIdx(wip.currentExerciseIdx);
+          setCurrentSet(wip.currentSet);
+          setExerciseLogs(wip.exerciseLogs);
+          setCurrentSetData(wip.currentSetData);
+          setReadiness(wip.readiness);
+          setExerciseOrder(wip.exerciseOrder?.length ? wip.exerciseOrder : currentExercises.map((_, i) => i));
+          setSkippedExercises(wip.skippedExercises ?? []);
+          setRemovedExercises([]);
+          hasStartedRef.current = true;
+          setStartMessage("");
+          setHesitationMessage("");
+          setCompletionMessage("");
+          setNeuroplasticMessage("");
+          setReflectionText("");
+          setShowHesitation(false);
+          // Do NOT clearWIP() here — the session is still in progress.
+          // WIP is cleared on completion, end-session-early, or explicit close-without-save.
+          return;
+        }
+      }
+
+      // Fresh session — reset everything
       setStatus("initializing");
       setStartMessage("");
       setHesitationMessage("");
@@ -98,6 +363,10 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
       setExerciseLogs([]);
       setCurrentSetData([]);
       setReadiness({ sleepQuality: 0, energyLevel: 0, painReported: false, painLocation: "" });
+      // Initialize exercise order as [0, 1, 2, ..., N-1]
+      setExerciseOrder(currentExercises.map((_, i) => i));
+      setSkippedExercises([]);
+      setRemovedExercises([]);
 
       recordWorkoutOpened();
 
@@ -109,7 +378,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
             setHesitationMessage(getRandomMessage("hesitation"));
             setShowHesitation(true);
           }
-        }, 35000);
+        }, HESITATION_DELAY_MS);
       }, 2000);
 
       return () => {
@@ -117,14 +386,67 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
         clearHesitationTimer();
       };
     }
-  }, [isOpen, clearHesitationTimer]);
+  }, [isOpen, clearHesitationTimer, workoutName]);
 
   useEffect(() => {
-    if (status === "active" || status === "setLog") {
+    if (status === "active" || status === "setLog" || status === "transition" || status === "resting") {
       const interval = setInterval(() => setTimer((prev) => prev + 1), 1000);
       return () => clearInterval(interval);
     }
   }, [status]);
+
+  // Countdown timer for timed exercises (e.g. "30s", "45s each")
+  useEffect(() => {
+    if (!isTimed || status !== "active") {
+      setCountdown(null);
+      return;
+    }
+    // Start countdown from target time in seconds
+    setCountdown(targetReps);
+    const interval = setInterval(() => {
+      setCountdown(prev => {
+        if (prev === null || prev <= 0) {
+          clearInterval(interval);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isTimed, status, currentSet, currentExerciseIdx, targetReps]);
+
+  // Auto-advance to set log when countdown reaches 0
+  useEffect(() => {
+    if (countdown === 0 && isTimed && status === "active") {
+      setStatus("setLog");
+    }
+  }, [countdown, isTimed, status]);
+
+  // Rest countdown between sets
+  useEffect(() => {
+    if (status !== "resting") {
+      setRestCountdown(null);
+      return;
+    }
+    setRestCountdown(restSeconds);
+    const interval = setInterval(() => {
+      setRestCountdown(prev => {
+        if (prev === null || prev <= 1) {
+          clearInterval(interval);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [status, restSeconds]);
+
+  // Auto-advance to active when rest completes
+  useEffect(() => {
+    if (restCountdown === 0 && status === "resting") {
+      setStatus("active");
+    }
+  }, [restCountdown, status]);
 
   useEffect(() => {
     return () => {
@@ -135,6 +457,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
 
   // Reset set inputs when exercise changes
   useEffect(() => {
+    setSetWeight(0);
     setSetReps(targetReps);
     setSetRPE(7);
     setSetForm(3);
@@ -188,6 +511,9 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     const updatedSetData = [...currentSetData, setData];
     setCurrentSetData(updatedSetData);
 
+    // Reset countdown for the next set
+    setCountdown(null);
+
     // Pain safety check
     if (setPain === "severe") {
       // Auto-complete exercise, move to next
@@ -197,8 +523,8 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
 
     if (currentSet < targetSets) {
       setCurrentSet(currentSet + 1);
-      // Carry weight forward
-      setStatus("active");
+      // Carry weight forward — show rest timer before next set
+      setStatus("resting");
     } else {
       // Exercise complete, finalize and advance
       finalizeExercise(updatedSetData);
@@ -214,12 +540,12 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
       actualSets: setData,
     };
 
-    if (currentExerciseIdx < exercises.length - 1) {
+    if (currentExerciseIdx < resolvedOrder.length - 1) {
+      // More exercises remain — commit log and show transition screen
       setExerciseLogs((prev) => [...prev, log]);
-      setCurrentExerciseIdx(currentExerciseIdx + 1);
       setCurrentSet(1);
       setCurrentSetData([]);
-      setStatus("active");
+      setStatus("transition");
     } else {
       // Last exercise — build final logs array synchronously to avoid stale state
       const finalLogs = [...exerciseLogs, log];
@@ -228,42 +554,200 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     }
   };
 
-  const handleComplete = (finalLogs: ExerciseLog[]) => {
-    setStatus("initializing");
-    completionDelayRef.current = setTimeout(() => {
-      recordWorkoutCompleted();
+  /** Defer the current exercise to the end of the order (user will encounter it again later) */
+  const handleSkipExercise = () => {
+    if (skipLockRef.current) return;
+    skipLockRef.current = true;
+    setTimeout(() => { skipLockRef.current = false; }, 300);
+    const newOrder = [...resolvedOrder];
+    const skippedOriginalIdx = newOrder[currentExerciseIdx];
+    // Remove from current position and push to end
+    newOrder.splice(currentExerciseIdx, 1);
+    newOrder.push(skippedOriginalIdx);
+    setExerciseOrder(newOrder);
+    if (!skippedExercises.includes(skippedOriginalIdx)) {
+      setSkippedExercises([...skippedExercises, skippedOriginalIdx]);
+    }
 
-      // Calculate total volume
-      const totalVolume = finalLogs.reduce((sum, ex) =>
-        sum + ex.actualSets.reduce((s, set) => s + set.weight * set.repsCompleted, 0), 0
-      );
-      const avgRPE = finalLogs.length > 0
-        ? finalLogs.reduce((sum, ex) =>
-            sum + ex.actualSets.reduce((s, set) => s + set.rpe, 0) / Math.max(ex.actualSets.length, 1), 0
-          ) / finalLogs.length
-        : 0;
+    // Do NOT auto-complete — the deferred exercise will come back around.
+    // Auto-complete only happens when all remaining are removed entirely.
 
+    // Reset set state for the new current exercise (same position, different exercise)
+    setCurrentSet(1);
+    setCurrentSetData([]);
+    // Stay on "active" — the exercise at currentExerciseIdx is now the next one
+  };
+
+  /** Permanently remove an exercise from the workout (user chose "Skip Entirely" on a deferred exercise) */
+  const handleRemoveExercise = () => {
+    if (skipLockRef.current) return;
+    skipLockRef.current = true;
+    setTimeout(() => { skipLockRef.current = false; }, 300);
+    const newOrder = [...resolvedOrder];
+    const removedOriginalIdx = newOrder[currentExerciseIdx];
+    // Permanently remove from order (don't push to end)
+    newOrder.splice(currentExerciseIdx, 1);
+    setExerciseOrder(newOrder);
+    const newRemoved = [...removedExercises, removedOriginalIdx];
+    setRemovedExercises(newRemoved);
+
+    // If no exercises remain in the order, auto-complete
+    if (newOrder.length === 0 || currentExerciseIdx >= newOrder.length) {
+      handleComplete(exerciseLogs, skippedExercises, newOrder);
+      return;
+    }
+
+    // Reset set state for the new current exercise
+    setCurrentSet(1);
+    setCurrentSetData([]);
+  };
+
+  /** Advance to the next exercise from the transition screen */
+  const handleProceedFromTransition = () => {
+    setCurrentExerciseIdx(currentExerciseIdx + 1);
+    setStatus("active");
+  };
+
+  /** Defer the upcoming exercise from the transition screen (moves to end) */
+  const handleSkipNextFromTransition = () => {
+    const nextIdx = currentExerciseIdx + 1;
+    const newOrder = [...resolvedOrder];
+    const skippedOriginalIdx = newOrder[nextIdx];
+    newOrder.splice(nextIdx, 1);
+    newOrder.push(skippedOriginalIdx);
+    setExerciseOrder(newOrder);
+    if (!skippedExercises.includes(skippedOriginalIdx)) {
+      setSkippedExercises([...skippedExercises, skippedOriginalIdx]);
+    }
+
+    // Do NOT auto-complete — the deferred exercise will come back around.
+    if (nextIdx >= newOrder.length) {
+      // No more exercises remain in order
+      handleComplete(exerciseLogs, skippedExercises, newOrder);
+      return;
+    }
+
+    // After skipping, nextIdx now points to a different exercise
+    setCurrentExerciseIdx(nextIdx);
+    setStatus("active");
+  };
+
+  /** Permanently remove the upcoming exercise from the transition screen */
+  const handleRemoveNextFromTransition = () => {
+    const nextIdx = currentExerciseIdx + 1;
+    const newOrder = [...resolvedOrder];
+    const removedOriginalIdx = newOrder[nextIdx];
+    // Permanently remove (don't push to end)
+    newOrder.splice(nextIdx, 1);
+    setExerciseOrder(newOrder);
+    setRemovedExercises([...removedExercises, removedOriginalIdx]);
+
+    if (nextIdx >= newOrder.length) {
+      // No more exercises remain
+      handleComplete(exerciseLogs, skippedExercises, newOrder);
+      return;
+    }
+
+    // After removing, nextIdx now points to a different exercise
+    setCurrentExerciseIdx(nextIdx);
+    setStatus("active");
+  };
+
+  /** Shared: save workout log to Firestore + update behavior state */
+  const saveWorkoutLog = (logs: ExerciseLog[], completionType: "full" | "partial") => {
+    if (logs.length === 0) return;
+    const totalVolume = logs.reduce((sum, ex) =>
+      sum + ex.actualSets.reduce((s, set) => s + set.weight * set.repsCompleted, 0), 0
+    );
+    const totalSetsCount = logs.reduce((sum, ex) => sum + ex.actualSets.length, 0);
+    const totalRPE = logs.reduce((sum, ex) =>
+      sum + ex.actualSets.reduce((s, set) => s + set.rpe, 0), 0
+    );
+    const avgRPE = totalSetsCount > 0 ? totalRPE / totalSetsCount : 0;
+
+    // Update behavior state synchronously (localStorage) so Dashboard sees it immediately
+    if (completionType === "full") {
+      const updatedState = recordWorkoutCompleted();
       if (user) {
-        const logId = `log_${Date.now()}`;
-        setDocument(`users/${user.uid}/workoutLogs/${logId}`, {
-          workoutName,
-          exercises: finalLogs,
-          duration: timer,
-          completedAt: new Date().toISOString(),
-          completionType: finalLogs.length >= exercises.length ? "full" : "partial",
-          readiness,
-          totalVolume,
-          avgRPE: Math.round(avgRPE * 10) / 10,
-        }).catch(console.warn);
-
+        syncChallengeProgress(user.uid, updatedState).catch(console.warn);
         notifyWorkoutComplete(user.uid, workoutName, timer).catch(console.warn);
       }
+    } else {
+      // Partial: mark training happened today + count toward 14d consistency
+      // (user showed up — partial effort is still effort)
+      // Don't inflate streak or weekly counters since the session wasn't completed
+      const partialState = getBehaviorState();
+      const isFirstToday = !partialState.lastWorkoutCompletedAt ||
+        new Date(partialState.lastWorkoutCompletedAt).toDateString() !== new Date().toDateString();
+      updateBehaviorState({
+        lastWorkoutCompletedAt: Date.now(),
+        // Only count toward 14d/total once per day to avoid double-counting with full completions
+        workoutsCompleted14d: isFirstToday ? partialState.workoutsCompleted14d + 1 : partialState.workoutsCompleted14d,
+        totalWorkoutsCompleted: partialState.totalWorkoutsCompleted + 1,
+      });
+      if (user) {
+        syncChallengeProgress(user.uid, getBehaviorState()).catch(console.warn);
+      }
+    }
 
-      const completedFull = currentExerciseIdx >= exercises.length - 1 && currentSet >= targetSets;
+    // Firestore write is fire-and-forget (behavior state already updated above)
+    if (user) {
+      const logId = `log_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      setDocument(`users/${user.uid}/workoutLogs/${logId}`, {
+        workoutName,
+        exercises: logs,
+        duration: timer,
+        completedAt: toLocalISO(new Date()),
+        completionType,
+        readiness,
+        totalVolume,
+        avgRPE: Math.round(avgRPE * 10) / 10,
+      }).catch(console.warn);
+    }
+  };
+
+  const handleComplete = (finalLogs: ExerciseLog[], currentSkipped?: number[], currentOrder?: number[]) => {
+    clearWIP(); wipFinishedRef.current = true;
+    // If no exercises were actually completed (all skipped/removed), close without saving
+    if (finalLogs.length === 0) {
+      onClose();
+      return;
+    }
+    // Capture order/skipped at call time to avoid stale closure from async setState
+    const orderSnapshot = currentOrder ?? resolvedOrder;
+    const skippedSnapshot = currentSkipped ?? skippedExercises;
+    // Count exercises that were actually in the workout (exclude removed ones)
+    const totalInWorkout = orderSnapshot.length + removedExercises.length;
+    const unskippedCount = totalInWorkout - new Set(skippedSnapshot).size - removedExercises.length;
+    const completionType = finalLogs.length >= unskippedCount ? "full" : "partial";
+    // Save immediately so data is never lost (even if user closes during animation)
+    saveWorkoutLog(finalLogs, completionType);
+    const completedFull = completionType === "full";
+    setStatus("initializing");
+    completionDelayRef.current = setTimeout(() => {
+      if (!isActiveRef.current) return;
       setCompletionMessage(getRandomMessage("completion"));
       setNeuroplasticMessage(getPostWorkoutMessage(completedFull, increasedIntensity));
       setStatus("reflection");
     }, 1500);
+  };
+
+  /** End session early — save whatever was completed as a partial workout */
+  const handleEndSessionEarly = () => {
+    if (!window.confirm("End session early? Remaining exercises will not be logged.")) return;
+    clearHesitationTimer();
+    clearWIP(); wipFinishedRef.current = true;
+    const partialLogs = currentSetData.length > 0
+      ? [...exerciseLogs, {
+          name: exerciseName,
+          plannedSets: targetSets,
+          plannedReps: String(currentExercise?.reps ?? targetReps),
+          rest: currentExercise?.rest ?? "60s",
+          actualSets: currentSetData,
+        } as ExerciseLog]
+      : [...exerciseLogs];
+    saveWorkoutLog(partialLogs, "partial");
+    onClose();
   };
 
   const handleReflectionSubmit = () => {
@@ -275,18 +759,14 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
   if (!isOpen) return null;
 
   // Calculate total sets done so far across all exercises
-  const totalSetsDone = exerciseLogs.reduce((sum, ex) => sum + ex.actualSets.length, 0) + (currentSet - 1);
+  // On reflection/encoded screens, all sets are in exerciseLogs — don't add currentSet
+  const inFinalScreen = status === "reflection" || status === "encoded";
+  const totalSetsDone = exerciseLogs.reduce((sum, ex) => sum + ex.actualSets.length, 0) + (inFinalScreen ? 0 : currentSet - 1);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/95">
       {/* Scanlines */}
-      <div
-        className="absolute inset-0 pointer-events-none opacity-[0.015]"
-        style={{
-          backgroundImage: `repeating-linear-gradient(0deg, transparent, transparent 1px, white 2px, white 2px)`,
-          backgroundSize: "100% 4px",
-        }}
-      />
+      <Scanline opacity="0.015" />
 
       <div className="relative w-full max-w-[375px] h-full flex flex-col">
         {/* Header */}
@@ -295,12 +775,18 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
             <div className={`${MONO} text-[10px] text-white/60 uppercase tracking-[2px]`}>
               Sequence Active
             </div>
-            <div className={`${MONO} text-[20px] text-[#ff6600] font-bold uppercase truncate max-w-[280px]`}>
+            <div className={`${MONO} text-[20px] text-[#ff6600] font-bold uppercase max-w-[280px] leading-tight line-clamp-2`}>
               [{String(currentExerciseIdx + 1).padStart(2, "0")}] {exerciseName}
             </div>
+            {skippedExercises.includes(resolvedOrder[currentExerciseIdx]) && status === "active" && (
+              <div className={`${MONO} text-[8px] text-[#ff6600]/70 uppercase tracking-wider mt-0.5`}>
+                Previously deferred
+              </div>
+            )}
           </div>
           <button
-            onClick={onClose}
+            onClick={handleCloseWithSave}
+            aria-label="Close"
             className="size-10 border border-white/30 flex items-center justify-center hover:border-[#ff6600] transition-colors"
           >
             <svg className="size-5" fill="none" viewBox="0 0 24 24" stroke="white">
@@ -357,7 +843,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                     </button>
                   ))}
                 </div>
-                <div className={`${MONO} text-[7px] text-white/30 mt-1 flex justify-between`}>
+                <div className={`${MONO} text-[7px] text-white/50 mt-1 flex justify-between`}>
                   <span>MINIMAL</span><span>OPTIMAL</span>
                 </div>
               </div>
@@ -382,7 +868,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                     </button>
                   ))}
                 </div>
-                <div className={`${MONO} text-[7px] text-white/30 mt-1 flex justify-between`}>
+                <div className={`${MONO} text-[7px] text-white/50 mt-1 flex justify-between`}>
                   <span>DEPLETED</span><span>CHARGED</span>
                 </div>
               </div>
@@ -461,6 +947,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                   </button>
                   <input
                     type="number"
+                    inputMode="decimal"
                     value={setWeight || ""}
                     onChange={(e) => { const n = Number(e.target.value); setSetWeight(isNaN(n) ? 0 : Math.max(0, n)); }}
                     placeholder="0"
@@ -473,12 +960,12 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                     +
                   </button>
                 </div>
-                <div className={`${MONO} text-[7px] text-white/30 text-center mt-1`}>LBS / KG</div>
+                <div className={`${MONO} text-[7px] text-white/50 text-center mt-1`}>LBS / KG</div>
               </div>
 
-              {/* Reps */}
+              {/* Reps / Time */}
               <div className="border border-white/20 p-4">
-                <div className={`${MONO} text-[8px] text-white/60 uppercase tracking-wider mb-2`}>Reps Completed</div>
+                <div className={`${MONO} text-[8px] text-white/60 uppercase tracking-wider mb-2`}>{isTimed ? "Time Completed (s)" : "Reps Completed"}</div>
                 <div className="flex items-center justify-center gap-4">
                   <button
                     onClick={() => setSetReps(Math.max(1, setReps - 1))}
@@ -487,7 +974,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                     -
                   </button>
                   <div className={`${MONO} text-[28px] text-white font-bold w-12 text-center`}>
-                    {setReps}
+                    {setReps}{isTimed ? "s" : ""}
                   </div>
                   <button
                     onClick={() => setSetReps(setReps + 1)}
@@ -496,7 +983,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                     +
                   </button>
                 </div>
-                <div className={`${MONO} text-[7px] text-white/30 text-center mt-1`}>TARGET: {targetReps}</div>
+                <div className={`${MONO} text-[7px] text-white/50 text-center mt-1`}>TARGET: {isTimed ? rawReps : targetReps}</div>
               </div>
 
               {/* RPE */}
@@ -518,7 +1005,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                     </button>
                   ))}
                 </div>
-                <div className={`${MONO} text-[7px] text-white/30 mt-1 flex justify-between`}>
+                <div className={`${MONO} text-[7px] text-white/50 mt-1 flex justify-between`}>
                   <span>EASY</span><span>MAX</span>
                 </div>
               </div>
@@ -606,7 +1093,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                   />
                 </div>
                 <div className="flex items-center justify-between">
-                  <div className={`${MONO} text-[8px] text-white/30`}>{reflectionText.length}/140</div>
+                  <div className={`${MONO} text-[8px] text-white/50`}>{reflectionText.length}/140</div>
                   <div className="flex gap-2">
                     <button onClick={handleSkipReflection} className={`border border-white/20 px-3 py-1.5 ${MONO} text-[8px] text-white/50 uppercase tracking-wide hover:bg-white/5 transition-colors`}>
                       Skip
@@ -699,15 +1186,150 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
           )}
 
           {/* ============================================================ */}
+          {/* TRANSITION SCREEN — between exercises */}
+          {/* ============================================================ */}
+          {status === "transition" && (() => {
+            const completedEx = exercises[resolvedOrder[currentExerciseIdx]];
+            const completedLog = exerciseLogs[exerciseLogs.length - 1];
+            const maxWeight = completedLog ? Math.max(...completedLog.actualSets.map((s) => s.weight), 0) : 0;
+            const setsLogged = completedLog ? completedLog.actualSets.length : 0;
+            const nextExIdx = currentExerciseIdx + 1;
+            const nextEx = nextExIdx < resolvedOrder.length ? exercises[resolvedOrder[nextExIdx]] : null;
+            const isDeferred = nextEx && skippedExercises.includes(resolvedOrder[nextExIdx]);
+            return (
+              <div className="space-y-5">
+                {/* Completed module summary */}
+                <div className="border-2 border-[#ff6600] p-5">
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="size-8 border-2 border-[#ff6600] flex items-center justify-center shrink-0">
+                      <svg className="size-5" fill="none" viewBox="0 0 18 18">
+                        <path d="M4 9L7.5 12.5L14 5.5" stroke="#ff6600" strokeWidth="2" strokeLinecap="square" strokeLinejoin="miter" />
+                      </svg>
+                    </div>
+                    <div>
+                      <div className={`${MONO} text-[9px] text-[#ff6600] uppercase tracking-[2px]`}>Module Complete</div>
+                      <div className={`${MONO} text-[15px] text-white font-bold uppercase`}>{completedEx?.name ?? "Exercise"}</div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="border border-white/20 p-3 text-center">
+                      <div className={`${MONO} text-[20px] text-white font-bold`}>{setsLogged}</div>
+                      <div className={`${MONO} text-[7px] text-white/40 uppercase tracking-wider`}>Sets Logged</div>
+                    </div>
+                    <div className="border border-white/20 p-3 text-center">
+                      <div className={`${MONO} text-[20px] ${maxWeight > 0 ? "text-[#ff6600]" : "text-white/40"} font-bold`}>
+                        {maxWeight > 0 ? maxWeight : "—"}
+                      </div>
+                      <div className={`${MONO} text-[7px] text-white/40 uppercase tracking-wider`}>Max Weight</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Next module preview */}
+                {nextEx && (
+                  <div className="border border-white/20 p-5">
+                    <div className={`${MONO} text-[9px] text-white/50 uppercase tracking-[2px] mb-3`}>Next Module</div>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className={`${MONO} text-[15px] text-white font-bold uppercase`}>{nextEx.name}</div>
+                        <div className={`${MONO} text-[10px] text-white/50 mt-1`}>
+                          {nextEx.sets} sets × {nextEx.reps} reps · {nextEx.rest} rest
+                        </div>
+                        {isDeferred && (
+                          <div className={`${MONO} text-[8px] text-[#ff6600] uppercase tracking-wider mt-1`}>
+                            Previously deferred · Do it now or skip entirely?
+                          </div>
+                        )}
+                      </div>
+                      <div className={`${MONO} text-[10px] text-white/30 shrink-0`}>
+                        [{String(nextExIdx + 1).padStart(2, "0")}/{resolvedOrder.length}]
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Timer running indicator */}
+                <div className="flex items-center gap-2 border border-white/10 p-3">
+                  <div className="size-2 bg-[#ff6600] animate-pulse shrink-0" />
+                  <div className={`${MONO} text-[8px] text-white/40 uppercase tracking-wider`}>
+                    Clock running · {formatTime(timer)} elapsed
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ============================================================ */}
+          {/* REST TIMER — between sets */}
+          {/* ============================================================ */}
+          {status === "resting" && (
+            <div className="flex-1 flex flex-col items-center justify-center p-6">
+              <div className={`${MONO} text-[10px] text-white/40 uppercase tracking-[2px] mb-4`}>
+                Rest Period
+              </div>
+              <div className={`${MONO} text-[64px] font-bold ${(restCountdown ?? 0) <= 6 ? 'text-[#ff6600]' : 'text-white'} ${(restCountdown ?? 0) <= 5 && (restCountdown ?? 0) > 0 ? 'animate-pulse' : ''}`}>
+                {restCountdown ?? 0}s
+              </div>
+              <div className={`${MONO} text-[9px] text-white/40 uppercase mt-2 mb-6`}>
+                Next: Set {currentSet} of {targetSets}
+              </div>
+              {/* Progress bar */}
+              <div className="w-full max-w-[280px] h-1 bg-white/10 relative mb-8">
+                <div
+                  className="absolute inset-y-0 left-0 bg-[#ff6600] transition-all duration-1000"
+                  style={{ width: `${((restSeconds - (restCountdown ?? 0)) / restSeconds) * 100}%` }}
+                />
+              </div>
+              <button
+                onClick={() => setStatus("active")}
+                className={`w-full max-w-[280px] border border-[#ff6600] text-[#ff6600] ${MONO} text-[11px] font-bold uppercase tracking-wider py-3 hover:bg-[#ff6600]/10 transition-colors`}
+              >
+                Skip Rest &rarr; Begin Set {currentSet}
+              </button>
+            </div>
+          )}
+
+          {/* ============================================================ */}
           {/* ACTIVE WORKOUT VIEW */}
           {/* ============================================================ */}
           {(status === "active" || status === "ready" || status === "paused" || status === "initializing") && (
             <>
-              {/* Timer */}
-              <div className="border-2 border-white/20 p-6 mb-6 flex flex-col items-center justify-center">
-                <div className={`${MONO} text-[10px] text-white/40 uppercase tracking-[2px] mb-2 text-center`}>Elapsed Time</div>
-                <div className={`${MONO} text-[48px] text-white font-bold tracking-wider text-center`}>{formatTime(timer)}</div>
-              </div>
+              {/* Countdown Timer for timed exercises */}
+              {isTimed && countdown !== null && status === "active" ? (
+                <>
+                  <div className="border-2 border-[#ff6600] p-6 mb-4 text-center relative">
+                    <div className={`${MONO} text-[10px] text-[#ff6600] uppercase tracking-[2px] mb-2`}>
+                      Time Remaining
+                    </div>
+                    <div className={`${MONO} text-[48px] font-bold ${countdown <= 6 ? 'text-[#ff6600]' : 'text-white'} ${countdown <= 5 && countdown > 0 ? 'animate-pulse' : ''}`}>
+                      {countdown}s
+                    </div>
+                    <div className={`${MONO} text-[8px] text-white/40 uppercase mt-1`}>
+                      Set {currentSet} of {targetSets}
+                    </div>
+                    {/* Progress bar */}
+                    <div className="mt-3 h-1 bg-white/10 relative">
+                      <div
+                        className="absolute inset-y-0 left-0 bg-[#ff6600] transition-all duration-1000"
+                        style={{ width: `${((targetReps - (countdown ?? 0)) / targetReps) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                  {/* Smaller elapsed timer underneath */}
+                  <div className="flex items-center justify-center gap-2 mb-4 border border-white/10 p-2">
+                    <div className="size-2 bg-[#ff6600] animate-pulse shrink-0" />
+                    <div className={`${MONO} text-[10px] text-white/40 uppercase tracking-wider`}>
+                      Elapsed · {formatTime(timer)}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                /* Standard elapsed timer for non-timed exercises */
+                <div className="border-2 border-white/20 p-6 mb-6 flex flex-col items-center justify-center">
+                  <div className={`${MONO} text-[10px] text-white/40 uppercase tracking-[2px] mb-2 text-center`}>Elapsed Time</div>
+                  <div className={`${MONO} text-[48px] text-white font-bold tracking-wider text-center`}>{formatTime(timer)}</div>
+                </div>
+              )}
 
               {/* Set/Rep Counter */}
               <div className="grid grid-cols-2 gap-4 mb-6">
@@ -717,8 +1339,8 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                   <div className={`${MONO} text-[8px] text-white/40 uppercase`}>of {targetSets}</div>
                 </div>
                 <div className="border border-white/20 p-4 text-center">
-                  <div className={`${MONO} text-[10px] text-white/60 uppercase tracking-wider mb-2`}>Target Reps</div>
-                  <div className={`${MONO} text-[36px] text-white font-bold`}>{targetReps}</div>
+                  <div className={`${MONO} text-[10px] text-white/60 uppercase tracking-wider mb-2`}>{isTimed ? "Target Time" : "Target Reps"}</div>
+                  <div className={`${MONO} text-[36px] text-white font-bold`}>{isTimed ? rawReps : targetReps}</div>
                   <div className={`${MONO} text-[8px] text-white/40 uppercase`}>per set</div>
                 </div>
               </div>
@@ -733,7 +1355,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                   />
                 </div>
                 <div className={`${MONO} text-[8px] text-white/40`}>
-                  SET {currentSet} OF {targetSets} · EXERCISE {currentExerciseIdx + 1}/{exercises.length}
+                  SET {currentSet} OF {targetSets} · EXERCISE {currentExerciseIdx + 1}/{resolvedOrder.length}
                 </div>
               </div>
 
@@ -745,7 +1367,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                 </div>
                 <div className="border border-white/20 p-3 text-center">
                   <div className={`${MONO} text-[8px] text-white/40 uppercase mb-1`}>Exercise</div>
-                  <div className={`${MONO} text-[16px] text-white font-bold`}>{currentExerciseIdx + 1}/{exercises.length}</div>
+                  <div className={`${MONO} text-[16px] text-white font-bold`}>{currentExerciseIdx + 1}/{resolvedOrder.length}</div>
                 </div>
                 <div className="border border-white/20 p-3 text-center">
                   <div className={`${MONO} text-[8px] text-white/40 uppercase mb-1`}>Elapsed</div>
@@ -757,14 +1379,17 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
               {status === "ready" && (
                 <div className="border-l-2 border-white/20 pl-4 py-2">
                   <div className={`${MONO} text-[9px] text-white/60 uppercase tracking-wider mb-2`}>
-                    Protocol — {exercises.length} modules
+                    Protocol — {resolvedOrder.length} modules
                   </div>
                   <ul className="space-y-1">
-                    {exercises.map((ex, i) => (
-                      <li key={i} className={`${MONO} text-[10px] text-white/80`}>
-                        · [{String(i + 1).padStart(2, "0")}] {ex.name} — {ex.sets}x{ex.reps} ({ex.rest} rest)
-                      </li>
-                    ))}
+                    {resolvedOrder.map((exIdx, pos) => {
+                      const ex = exercises[exIdx];
+                      return (
+                        <li key={pos} className={`${MONO} text-[10px] text-white/80`}>
+                          · [{String(pos + 1).padStart(2, "0")}] {ex.name} — {ex.sets}x{ex.reps} ({ex.rest} rest)
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               )}
@@ -803,16 +1428,75 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                 onClick={handleSetComplete}
                 className={`w-full bg-[#ff6600] text-black ${MONO} text-[12px] font-bold uppercase tracking-wider py-4 hover:bg-[#ff8833] transition-colors`}
               >
-                Set Complete · Log Data [{currentSet}/{targetSets}]
+                {isTimed && countdown !== null && countdown > 0
+                  ? `End Early · Log Set [{currentSet}/{targetSets}]`
+                  : `Set Complete · Log Data [{currentSet}/{targetSets}]`}
               </button>
-              <button
-                onClick={handlePause}
-                className={`w-full border-2 border-white/30 text-white ${MONO} text-[11px] font-bold uppercase tracking-wider py-3 hover:bg-white/10 transition-colors`}
-              >
-                Pause Sequence
-              </button>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={handlePause}
+                  className={`w-full border-2 border-white/30 text-white ${MONO} text-[11px] font-bold uppercase tracking-wider py-3 hover:bg-white/10 transition-colors`}
+                >
+                  Pause
+                </button>
+                {skippedExercises.includes(resolvedOrder[currentExerciseIdx]) ? (
+                  <button
+                    onClick={handleRemoveExercise}
+                    className={`w-full border-2 border-white/30 text-white/70 ${MONO} text-[11px] font-bold uppercase tracking-wider py-3 hover:border-red-500 hover:text-red-400 transition-colors`}
+                  >
+                    Skip Entirely
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleSkipExercise}
+                    disabled={resolvedOrder.length <= 1}
+                    className={`w-full border-2 text-[11px] font-bold uppercase tracking-wider py-3 transition-colors ${MONO} ${
+                      resolvedOrder.length <= 1
+                        ? "border-white/10 text-white/20 cursor-not-allowed"
+                        : "border-white/30 text-white/70 hover:border-[#ff6600] hover:text-[#ff6600]"
+                    }`}
+                    title="Machine taken? Defer this exercise — it will be added to the end of your session."
+                  >
+                    Defer Module
+                  </button>
+                )}
+              </div>
             </>
           )}
+
+          {status === "transition" && (() => {
+            const nextExIdx = currentExerciseIdx + 1;
+            const nextEx = nextExIdx < resolvedOrder.length ? exercises[resolvedOrder[nextExIdx]] : null;
+            const nextIsDeferred = nextEx && skippedExercises.includes(resolvedOrder[nextExIdx]);
+            // Only allow skipping next if there will still be exercises after it
+            const canSkipNext = nextEx !== null && resolvedOrder.length - (currentExerciseIdx + 1) > 1;
+            return (
+              <>
+                <button
+                  onClick={handleProceedFromTransition}
+                  className={`w-full bg-[#ff6600] text-black ${MONO} text-[12px] font-bold uppercase tracking-wider py-4 hover:bg-[#ff8833] transition-colors`}
+                >
+                  {nextIsDeferred ? "Do Module Now" : "Proceed to Next Module"}
+                </button>
+                {canSkipNext && !nextIsDeferred && (
+                  <button
+                    onClick={handleSkipNextFromTransition}
+                    className={`w-full border-2 border-white/30 text-white/70 ${MONO} text-[11px] font-bold uppercase tracking-wider py-3 hover:border-[#ff6600] hover:text-[#ff6600] transition-colors`}
+                  >
+                    Defer Module
+                  </button>
+                )}
+                {nextIsDeferred && (
+                  <button
+                    onClick={handleRemoveNextFromTransition}
+                    className={`w-full border-2 border-white/30 text-white/70 ${MONO} text-[11px] font-bold uppercase tracking-wider py-3 hover:border-red-500 hover:text-red-400 transition-colors`}
+                  >
+                    Skip Entirely
+                  </button>
+                )}
+              </>
+            );
+          })()}
 
           {status === "setLog" && (
             <button
@@ -832,7 +1516,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                 Resume Sequence
               </button>
               <button
-                onClick={onClose}
+                onClick={handleEndSessionEarly}
                 className={`w-full border-2 border-white/30 text-white ${MONO} text-[11px] font-bold uppercase tracking-wider py-3 hover:bg-white/10 transition-colors`}
               >
                 End Session
@@ -843,7 +1527,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
           {status === "encoded" && (
             <>
               <button
-                onClick={onClose}
+                onClick={() => { clearWIP(); wipFinishedRef.current = true; onClose(); }}
                 className={`w-full bg-[#ff6600] text-black ${MONO} text-[12px] font-bold uppercase tracking-wider py-4 hover:bg-[#ff8833] transition-colors`}
               >
                 Return to Dashboard
@@ -869,6 +1553,8 @@ function StatusBanner({ status }: { status: string }) {
     readiness: { color: "#ff6600", text: "Pre-session diagnostic · Assessing readiness", pulse: true },
     active: { color: "#ff6600", text: "Sequence in progress · Recording data", pulse: true },
     setLog: { color: "#ff6600", text: "Logging set data · Capture performance", pulse: true },
+    resting: { color: "#ff6600", text: "Rest period · Recovery in progress", pulse: true },
+    transition: { color: "#ff6600", text: "Module complete · Preparing next target", pulse: true },
     paused: { color: "white", text: "Sequence paused · Awaiting resume command" },
     reflection: { color: "#ff6600", text: "Operation complete · Reflection required" },
     complete: { color: "white", text: "Operation complete · Identity encoded" },
