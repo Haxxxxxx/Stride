@@ -165,6 +165,157 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
   // Debounce rapid skip taps to prevent stale-state race conditions
   const skipLockRef = useRef(false);
 
+  // ============================================================
+  // Picture-in-Picture floating timer
+  // ============================================================
+  const [isPiP, setIsPiP] = useState(false);
+  const pipVideoRef = useRef<HTMLVideoElement | null>(null);
+  const pipCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const pipIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pipSupported = typeof document !== "undefined" && "pictureInPictureEnabled" in document && (document as any).pictureInPictureEnabled;
+
+  // Ref for PiP render loop — holds latest display state without stale closures
+  const pipDisplayRef = useRef({
+    timer: 0, countdown: null as number | null, restCountdown: null as number | null,
+    exerciseName: "", currentExerciseIdx: 0, currentSet: 1, targetSets: 3,
+    totalExercises: 0, workoutName: "", status: "active" as string, isTimed: false,
+  });
+  useEffect(() => {
+    pipDisplayRef.current = {
+      timer, countdown, restCountdown, exerciseName, currentExerciseIdx,
+      currentSet, targetSets, totalExercises: resolvedOrder.length, workoutName, status, isTimed,
+    };
+  });
+
+  const renderPiPFrame = useCallback(() => {
+    const canvas = pipCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const d = pipDisplayRef.current;
+    const W = canvas.width, H = canvas.height;
+
+    // Background
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
+
+    // Top border accent
+    ctx.fillStyle = "#ff6600";
+    ctx.fillRect(0, 0, W, 3);
+
+    // Helper: format seconds to MM:SS
+    const fmt = (s: number) => `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
+
+    // Workout name — top left
+    ctx.font = "bold 14px 'JetBrains Mono', monospace";
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.textAlign = "left";
+    ctx.fillText(d.workoutName.toUpperCase(), 16, 28);
+
+    // Exercise label — top right
+    ctx.font = "12px 'JetBrains Mono', monospace";
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#ff6600";
+    ctx.fillText(`[${String(d.currentExerciseIdx + 1).padStart(2, "0")}/${String(d.totalExercises).padStart(2, "0")}]`, W - 16, 28);
+
+    // Current exercise name
+    ctx.textAlign = "center";
+    ctx.font = "bold 16px 'JetBrains Mono', monospace";
+    ctx.fillStyle = "#fff";
+    const name = d.exerciseName.length > 22 ? d.exerciseName.slice(0, 20) + "…" : d.exerciseName;
+    ctx.fillText(name, W / 2, 62);
+
+    // Set info
+    ctx.font = "12px 'JetBrains Mono', monospace";
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.fillText(`SET ${d.currentSet} / ${d.targetSets}`, W / 2, 82);
+
+    // Main display — depends on state
+    if (d.status === "resting" && d.restCountdown !== null) {
+      // Rest countdown — large and orange
+      ctx.font = "bold 56px 'JetBrains Mono', monospace";
+      ctx.fillStyle = "#ff6600";
+      ctx.fillText(fmt(d.restCountdown), W / 2, 145);
+      ctx.font = "11px 'JetBrains Mono', monospace";
+      ctx.fillStyle = "rgba(255,255,255,0.4)";
+      ctx.fillText("REST", W / 2, 168);
+    } else if (d.isTimed && d.countdown !== null) {
+      // Timed exercise countdown
+      ctx.font = "bold 56px 'JetBrains Mono', monospace";
+      ctx.fillStyle = d.countdown <= 5 ? "#ff6600" : "#fff";
+      ctx.fillText(fmt(d.countdown), W / 2, 145);
+      ctx.font = "11px 'JetBrains Mono', monospace";
+      ctx.fillStyle = "rgba(255,255,255,0.4)";
+      ctx.fillText("COUNTDOWN", W / 2, 168);
+    } else {
+      // Normal elapsed timer
+      ctx.font = "bold 56px 'JetBrains Mono', monospace";
+      ctx.fillStyle = "#fff";
+      ctx.fillText(fmt(d.timer), W / 2, 145);
+    }
+
+    // Bottom bar — total elapsed (when showing countdown)
+    if (d.status === "resting" || (d.isTimed && d.countdown !== null)) {
+      ctx.font = "11px 'JetBrains Mono', monospace";
+      ctx.fillStyle = "rgba(255,255,255,0.3)";
+      ctx.fillText(`ELAPSED ${fmt(d.timer)}`, W / 2, H - 12);
+    }
+
+    // Push frame to video stream
+    try {
+      const track = (pipVideoRef.current?.srcObject as MediaStream)?.getVideoTracks()[0];
+      if (track && "requestFrame" in track) (track as any).requestFrame();
+    } catch { /* not supported — captureStream auto-captures */ }
+  }, []);
+
+  const closePiP = useCallback(() => {
+    if (pipIntervalRef.current) { clearInterval(pipIntervalRef.current); pipIntervalRef.current = null; }
+    if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
+    setIsPiP(false);
+  }, []);
+
+  const togglePiP = useCallback(async () => {
+    if (!pipSupported) return;
+
+    // If already in PiP — exit
+    if (document.pictureInPictureElement) {
+      closePiP();
+      return;
+    }
+
+    try {
+      // Create canvas (once)
+      if (!pipCanvasRef.current) {
+        const c = document.createElement("canvas");
+        c.width = 400; c.height = 200;
+        pipCanvasRef.current = c;
+      }
+
+      // Create video element (once)
+      if (!pipVideoRef.current) {
+        const v = document.createElement("video");
+        v.setAttribute("playsinline", "");
+        v.muted = true;
+        v.srcObject = pipCanvasRef.current.captureStream(0);
+        await v.play();
+        pipVideoRef.current = v;
+        v.addEventListener("leavepictureinpicture", () => {
+          if (pipIntervalRef.current) { clearInterval(pipIntervalRef.current); pipIntervalRef.current = null; }
+          setIsPiP(false);
+        });
+      }
+
+      // Start 1fps render loop
+      renderPiPFrame();
+      pipIntervalRef.current = setInterval(renderPiPFrame, 1000);
+
+      await pipVideoRef.current.requestPictureInPicture();
+      setIsPiP(true);
+    } catch (e) {
+      console.warn("PiP not available:", e);
+    }
+  }, [pipSupported, renderPiPFrame, closePiP]);
+
   // When true, unmount cleanup should NOT re-save WIP (session was intentionally ended)
   const wipFinishedRef = useRef(false);
 
@@ -219,6 +370,9 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
       window.removeEventListener("beforeunload", saveOnExit);
       // Component unmounting (navigation) — save if workout in progress
       saveOnExit();
+      // Clean up PiP on unmount
+      if (pipIntervalRef.current) clearInterval(pipIntervalRef.current);
+      if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
     };
   }, []); // empty deps — runs once, uses refs for latest values
 
@@ -712,7 +866,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
   };
 
   const handleComplete = (finalLogs: ExerciseLog[], currentSkipped?: number[], currentOrder?: number[]) => {
-    clearWIP(); wipFinishedRef.current = true;
+    clearWIP(); wipFinishedRef.current = true; closePiP();
     // If no exercises were actually completed (all skipped/removed), close without saving
     if (finalLogs.length === 0) {
       onClose();
@@ -741,7 +895,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
   const handleEndSessionEarly = () => {
     if (!window.confirm("End session early? Remaining exercises will not be logged.")) return;
     clearHesitationTimer();
-    clearWIP(); wipFinishedRef.current = true;
+    clearWIP(); wipFinishedRef.current = true; closePiP();
     const partialLogs = currentSetData.length > 0
       ? [...exerciseLogs, {
           name: exerciseName,
@@ -789,15 +943,29 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
               </div>
             )}
           </div>
-          <button
-            onClick={handleCloseWithSave}
-            aria-label="Close"
-            className="size-10 border border-white/30 flex items-center justify-center hover:border-[#ff6600] transition-colors"
-          >
-            <svg className="size-5" fill="none" viewBox="0 0 24 24" stroke="white">
-              <path strokeLinecap="square" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-2">
+            {pipSupported && (
+              <button
+                onClick={togglePiP}
+                aria-label={isPiP ? "Close floating timer" : "Float timer"}
+                className={`size-10 border flex items-center justify-center transition-colors ${isPiP ? "border-[#ff6600] bg-[#ff6600]/10" : "border-white/30 hover:border-[#ff6600]"}`}
+              >
+                <svg className="size-5" fill="none" viewBox="0 0 24 24" stroke={isPiP ? "#ff6600" : "white"} strokeWidth={1.5}>
+                  <rect x="2" y="3" width="20" height="14" rx="1" />
+                  <rect x="11" y="10" width="10" height="8" rx="1" fill={isPiP ? "#ff6600" : "none"} stroke={isPiP ? "#ff6600" : "white"} />
+                </svg>
+              </button>
+            )}
+            <button
+              onClick={handleCloseWithSave}
+              aria-label="Close"
+              className="size-10 border border-white/30 flex items-center justify-center hover:border-[#ff6600] transition-colors"
+            >
+              <svg className="size-5" fill="none" viewBox="0 0 24 24" stroke="white">
+                <path strokeLinecap="square" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Status Banner */}
@@ -1532,7 +1700,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
           {status === "encoded" && (
             <>
               <button
-                onClick={() => { clearWIP(); wipFinishedRef.current = true; onClose(); }}
+                onClick={() => { clearWIP(); wipFinishedRef.current = true; closePiP(); onClose(); }}
                 className={`w-full bg-[#ff6600] text-black ${MONO} text-[12px] font-bold uppercase tracking-wider py-4 hover:bg-[#ff8833] transition-colors`}
               >
                 Return to Dashboard
