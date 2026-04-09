@@ -388,31 +388,36 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     }
   }, [isOpen, clearHesitationTimer, workoutName]);
 
+  // Timestamp-based main timer — survives background tab throttling
   useEffect(() => {
     if (status === "active" || status === "setLog" || status === "transition" || status === "resting") {
-      const interval = setInterval(() => setTimer((prev) => prev + 1), 1000);
-      return () => clearInterval(interval);
+      // Epoch = the real-world time corresponding to timer=0
+      const epoch = Date.now() - timerRef.current * 1000;
+      const sync = () => setTimer(Math.floor((Date.now() - epoch) / 1000));
+      const interval = setInterval(sync, 1000);
+      const onVisible = () => { if (document.visibilityState === "visible") sync(); };
+      document.addEventListener("visibilitychange", onVisible);
+      return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
     }
   }, [status]);
 
-  // Countdown timer for timed exercises (e.g. "30s", "45s each")
+  // Timestamp-based countdown for timed exercises (e.g. "30s", "45s each")
   useEffect(() => {
     if (!isTimed || status !== "active") {
       setCountdown(null);
       return;
     }
-    // Start countdown from target time in seconds
     setCountdown(targetReps);
-    const interval = setInterval(() => {
-      setCountdown(prev => {
-        if (prev === null || prev <= 0) {
-          clearInterval(interval);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(interval);
+    const startedAt = Date.now();
+    const sync = () => {
+      const remaining = Math.max(targetReps - Math.floor((Date.now() - startedAt) / 1000), 0);
+      setCountdown(remaining);
+      if (remaining <= 0) clearInterval(interval);
+    };
+    const interval = setInterval(sync, 1000);
+    const onVisible = () => { if (document.visibilityState === "visible") sync(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
   }, [isTimed, status, currentSet, currentExerciseIdx, targetReps]);
 
   // Auto-advance to set log when countdown reaches 0
@@ -422,23 +427,23 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     }
   }, [countdown, isTimed, status]);
 
-  // Rest countdown between sets
+  // Timestamp-based rest countdown between sets
   useEffect(() => {
     if (status !== "resting") {
       setRestCountdown(null);
       return;
     }
     setRestCountdown(restSeconds);
-    const interval = setInterval(() => {
-      setRestCountdown(prev => {
-        if (prev === null || prev <= 1) {
-          clearInterval(interval);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(interval);
+    const startedAt = Date.now();
+    const sync = () => {
+      const remaining = Math.max(restSeconds - Math.floor((Date.now() - startedAt) / 1000), 0);
+      setRestCountdown(remaining);
+      if (remaining <= 0) clearInterval(interval);
+    };
+    const interval = setInterval(sync, 1000);
+    const onVisible = () => { if (document.visibilityState === "visible") sync(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
   }, [status, restSeconds]);
 
   // Auto-advance to active when rest completes
