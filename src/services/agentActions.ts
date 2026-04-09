@@ -824,6 +824,47 @@ export const AGENT_TOOL_NAMES = [
   "loadDayWorkout", "logActivity",
 ] as const;
 
+async function handleGenerateNewProgram(
+  uid: string,
+  args: Record<string, unknown>
+): Promise<ActionResult> {
+  const focus = (args.focus as string) || "";
+
+  const proposal: ActionProposal = {
+    actionName: "generateNewProgram",
+    description: `Generate a new full training program${focus ? ` focused on ${focus}` : " based on your profile"}. Your current program will be deactivated.`,
+    preview: { exercises: [] },
+    programId: "",
+    execute: async () => {
+      const { generateProgram } = await import("./programGenerator");
+      const personalization = await getDocument<PersonalizationData>(`users/${uid}/personalization/data`);
+      if (!personalization) throw new Error("No personalization data found. Complete onboarding first.");
+
+      // Generate the new program
+      const program = await generateProgram(personalization);
+
+      // Deactivate the old program
+      const oldPrograms = await queryCollection<ProgramDoc>(
+        `users/${uid}/programs`,
+        [where("active", "==", true)]
+      );
+      for (const old of oldPrograms) {
+        await updateDocument(`users/${uid}/programs/${old.id}`, { active: false });
+      }
+
+      // Save the new program
+      const programId = `prog_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      await setDocument(`users/${uid}/programs/${programId}`, {
+        ...program,
+        active: true,
+        createdAt: toLocalISO(new Date()),
+      }, false);
+    },
+  };
+
+  return { type: "proposal", proposal };
+}
+
 /** Normalize snake_case to camelCase (Gemini sometimes returns snake_case names) */
 function toCamelCase(name: string): string {
   return name.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
@@ -869,6 +910,8 @@ export async function executeAction(
       result = await handleLoadDayWorkout(uid, args); break;
     case "logActivity":
       result = await handleLogActivity(uid, args); break;
+    case "generateNewProgram":
+      result = await handleGenerateNewProgram(uid, args); break;
     default:
       return { type: "data", data: { error: `Unknown action: ${functionName}` } };
   }

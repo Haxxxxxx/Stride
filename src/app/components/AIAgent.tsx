@@ -1,16 +1,17 @@
-import { Link } from "react-router";
 import { useState, useRef, useEffect, useCallback } from "react";
+import { Link, useNavigate } from "react-router";
+import { Scanline } from "./Scanline";
 import svgPaths from "../../imports/svg-oe8cws8da9";
-import { getAgentResponse, containsDelayLanguage, containsResetLanguage } from "../utils/agentLayer";
+import { containsDelayLanguage, containsResetLanguage, detectMode } from "../utils/agentLayer";
 import { shouldDeliverFriction } from "../utils/frictionEngine";
-import { recordAgentInteraction, recordDelayLanguage, recordResetEvent, getBehaviorState, calculateAlignmentScore } from "../utils/behaviorStore";
+import { recordAgentInteraction, recordDelayLanguage, recordResetEvent, recordFrictionDelivered, getBehaviorState, calculateAlignmentScore } from "../utils/behaviorStore";
 import { buildSystemPrompt, getAgentWelcome, type AgentId, type AgentContext } from "../../services/agentPrompts";
 import { useAuth } from "../contexts/AuthContext";
-import { getDocument, setDocument, updateDocument, queryCollection, where, orderBy, limit } from "../../services/firestore";
-import { detectMode } from "../utils/agentLayer";
+import { getDocument, setDocument, updateDocument, deleteDocument, queryCollection, subscribeToCollection, where, orderBy, limit, increment } from "../../services/firestore";
 import { createAgentModel, createChatModel, startAgentChat, needsTools, type ChatSession } from "../../services/gemini";
-import { executeAction, type ActionProposal } from "../../services/agentActions";
-import type { Program } from "../../services/programGenerator";
+import { executeAction, AGENT_TOOL_NAMES, type ActionProposal } from "../../services/agentActions";
+import type { Program, Week } from "../../services/programGenerator";
+import { getTodayDayIndex, getCurrentProgramWeek } from "../utils/dateUtils";
 import type { EnhancedGenerateContentResponse } from "firebase/ai";
 
 /** Safely extract text from a Gemini response — returns empty string on failure */
@@ -20,20 +21,6 @@ function safeText(response: EnhancedGenerateContentResponse): string {
   } catch {
     return "";
   }
-}
-
-interface ProgramWeekData {
-  weekNumber: number;
-  days: Array<{
-    dayNumber: number;
-    name: string;
-    exercises: Array<{
-      name: string;
-      sets: number;
-      reps: string;
-      rest: string;
-    }>;
-  }>;
 }
 
 interface Message {
@@ -54,9 +41,14 @@ interface Message {
   };
   programData?: {
     name: string;
-    weeks: ProgramWeekData[];
+    weeks: Week[];
   };
   proposalId?: string;
+  bonusWorkout?: {
+    dayNumber: number;
+    name: string;
+    exercises: Array<{ name: string; sets: number; reps: number | string; rest: string }>;
+  };
 }
 
 type Agent = "atlas" | "orion" | "kade";
@@ -114,7 +106,7 @@ function EmptyCircle() {
 const CHAT_STORAGE_KEY = "stride_chat_history";
 const MAX_PERSISTED_MESSAGES = 50;
 const MAX_IN_MEMORY_MESSAGES = 60; // Cap in-memory messages to prevent unbounded growth
-const MAX_GEMINI_HISTORY = 10; // Last N user+ai turns to pass as Gemini conversation history
+const MAX_GEMINI_HISTORY = 20; // Last N user+ai turns to pass as Gemini conversation history
 const FIRESTORE_SAVE_DEBOUNCE = 15000; // Debounce Firestore writes (15s reduces cost ~70%)
 
 /** Load chat history from localStorage (fast, synchronous) */
@@ -174,7 +166,7 @@ function buildGeminiHistory(messages: Message[]): { role: "user" | "model"; part
   const history: { role: "user" | "model"; parts: [{ text: string }] }[] = [];
   // Only take the last MAX_GEMINI_HISTORY pairs of user+ai messages
   const relevant = messages
-    .filter(m => m.type === "user" || m.type === "ai" || m.type === "pattern")
+    .filter(m => m.type === "user" || m.type === "ai" || m.type === "pattern" || m.type === "friction")
     .slice(-(MAX_GEMINI_HISTORY * 2));
 
   for (const msg of relevant) {
@@ -225,19 +217,22 @@ function saveChatHistory(
 
 export default function AIAgent() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
   const [currentAgent, setCurrentAgent] = useState<Agent>("atlas");
   const [showAgentModal, setShowAgentModal] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<Agent>(currentAgent);
   const [userProfile, setUserProfile] = useState<AgentContext["userProfile"]>(null);
+  const [callsign, setCallsign] = useState<string | undefined>();
   const [messages, setMessages] = useState<Message[]>(() => {
     // Fast restore from localStorage on mount (Firestore checked async in useEffect)
     const saved = loadChatHistoryLocal();
     if (saved && saved.length > 0) return saved;
+    const now = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
     return [
-      { type: "system", text: "COMMAND CHANNEL ESTABLISHED", timestamp: "09:41" },
-      { type: "ai", text: "Initializing agent...", timestamp: "09:41" },
+      { type: "system", text: "COMMAND CHANNEL ESTABLISHED", timestamp: now },
+      { type: "ai", text: "Initializing agent...", timestamp: now },
     ];
   });
 
@@ -245,6 +240,7 @@ export default function AIAgent() {
   const [chatSession, setChatSession] = useState<ChatSession | null>(null);
   const [toolSession, setToolSession] = useState<ChatSession | null>(null);
   const [pendingProposal, setPendingProposal] = useState<ActionProposal | null>(null);
+  const [pendingProposalId, setPendingProposalId] = useState<string | null>(null);
   const [activeProgram, setActiveProgram] = useState<(Program & { id: string }) | null>(null);
   const lastSendRef = useRef(0); // rate limiting
   const firestoreSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -253,6 +249,15 @@ export default function AIAgent() {
   const inputRef = useRef<HTMLInputElement>(null);
   const initRef = useRef(false);
 
+  // Stable refs so the unmount effect never closes over stale state
+  const messagesRef = useRef(messages);
+  const currentAgentRef = useRef(currentAgent);
+  const callsignRef = useRef(callsign);
+  const recentWorkoutsRef = useRef<AgentContext["recentWorkouts"]>([]);
+  const recentModificationsRef = useRef<AgentContext["recentModifications"]>([]);
+  /** Track behavior state snapshot to detect changes (e.g., workout completed mid-conversation) */
+  const lastBehaviorKeyRef = useRef("");
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -260,6 +265,35 @@ export default function AIAgent() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Keep refs in sync — direct assignment (no useEffect needed for refs)
+  messagesRef.current = messages;
+  currentAgentRef.current = currentAgent;
+  callsignRef.current = callsign;
+
+  // Real-time listener for active program — stays in sync with Firestore at all times
+  useEffect(() => {
+    if (!user) return;
+    const unsub = subscribeToCollection<Program & { id: string; active: boolean }>(
+      `users/${user.uid}/programs`,
+      [where("active", "==", true), limit(1)],
+      (programs) => {
+        if (programs.length > 0) {
+          setActiveProgram(programs[0]);
+        } else {
+          setActiveProgram(null);
+        }
+      }
+    );
+    return unsub;
+  }, [user]);
+
+  // Escape key closes the agent selection modal
+  useEffect(() => {
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === "Escape") setShowAgentModal(false); };
+    if (showAgentModal) document.addEventListener("keydown", handleEsc);
+    return () => document.removeEventListener("keydown", handleEsc);
+  }, [showAgentModal]);
 
   // Persist chat history + cap in-memory messages
   useEffect(() => {
@@ -273,23 +307,24 @@ export default function AIAgent() {
   }, [messages, currentAgent]);
 
   // Flush pending Firestore save immediately on unmount (captures last message before close)
+  // Uses refs so this effect only registers/unregisters when user.uid changes — not on every message
   useEffect(() => {
     return () => {
       if (firestoreSaveTimerRef.current && user?.uid) {
         clearTimeout(firestoreSaveTimerRef.current);
         firestoreSaveTimerRef.current = null;
-        const toSave = messages.filter(m => m.type !== "proposal").slice(-MAX_PERSISTED_MESSAGES);
+        const toSave = messagesRef.current.filter(m => m.type !== "proposal").slice(-MAX_PERSISTED_MESSAGES);
         if (toSave.length > 2) {
           setDocument(`users/${user.uid}/chatHistory/latest`, {
-            messages: toSave, agent: currentAgent, savedAt: Date.now()
+            messages: toSave, agent: currentAgentRef.current, savedAt: Date.now()
           }).catch(() => {});
         }
       }
     };
-  }, [user?.uid, messages, currentAgent]);
+  }, [user?.uid]);
 
   const getTimestamp = () => {
-    return new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+    return new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
   };
 
   // Build context and initialize both Gemini sessions (chat + tools)
@@ -300,19 +335,40 @@ export default function AIAgent() {
     recentWorkouts?: AgentContext["recentWorkouts"],
     recentModifications?: AgentContext["recentModifications"],
     currentMessages?: Message[],
+    agentCallsign?: string,
   ) => {
     try {
       const behaviorState = getBehaviorState();
+      const behaviorKey = `${behaviorState.streakDays}-${behaviorState.totalWorkoutsCompleted}-${behaviorState.alignmentScore}`;
+      lastBehaviorKeyRef.current = behaviorKey;
       const context: AgentContext = {
         behaviorState,
+        callsign: agentCallsign || callsignRef.current,
         userProfile: profile,
-        activeProgram: program ? {
-          name: program.name,
-          currentWeek: program.weeks[0]?.weekNumber ?? 1,
-          currentDay: program.weeks[0]?.days[0]?.name ?? "Day 1",
-          totalWeeks: program.weeks.length,
-          weekType: (program.weeks[0] as { weekType?: string })?.weekType,
-        } : null,
+        activeProgram: program ? (() => {
+          // Calculate current week + today using shared utilities (same formulas as Dashboard)
+          const currentWeekNum = getCurrentProgramWeek(program.createdAt, program.weeks.length);
+          const weekData = program.weeks[currentWeekNum - 1] ?? program.weeks[0];
+          const totalDaysInWeek = weekData?.days.length ?? 0;
+          const todayIdx = getTodayDayIndex();
+          const isRestDay = totalDaysInWeek > 0 && todayIdx >= totalDaysInWeek;
+          const todayDay = isRestDay ? null : weekData?.days[todayIdx];
+          // Check if today's workout is completed — use lastWorkoutCompletedAt from behavior state
+          const lastCompletedTs = behaviorState.lastWorkoutCompletedAt || 0;
+          const todayCompleted = lastCompletedTs > 0 && new Date(lastCompletedTs).toDateString() === new Date().toDateString();
+          return {
+            name: program.name,
+            currentWeek: currentWeekNum,
+            currentDay: todayDay?.name ?? (isRestDay ? "Rest Day" : "Day 1"),
+            totalWeeks: program.weeks.length,
+            weekType: (weekData as { weekType?: string })?.weekType,
+            todayDayNumber: todayDay?.dayNumber ?? 0,
+            totalDaysInWeek,
+            isRestDay,
+            todayExercises: todayDay?.exercises?.map(e => ({ name: e.name, sets: e.sets, reps: String(e.reps) })),
+            todayCompleted,
+          };
+        })() : null,
         recentWorkouts,
         recentModifications,
       };
@@ -342,8 +398,14 @@ export default function AIAgent() {
 
   // Load agent + profile + active program from Firestore on mount
   useEffect(() => {
-    if (!user || initRef.current) return;
-    initRef.current = true;
+    if (!user) return;
+    // Reset initRef if user changed (shared device / re-login)
+    if (initRef.current && user.uid !== (initRef as { current: string | boolean }).current) {
+      initRef.current = false;
+    }
+    if (initRef.current) return;
+    (initRef as { current: string | boolean }).current = user.uid;
+    toolConversationRef.current = false; // Reset stale tool conversation state
 
     calculateAlignmentScore();
 
@@ -351,14 +413,29 @@ export default function AIAgent() {
       let profile: AgentContext["userProfile"] = null;
       let program: (Program & { id: string }) | null = null;
       let agent: Agent = "atlas";
+      let userCallsign: string | undefined;
+
+      // Load callsign from user doc
+      try {
+        const userDoc = await getDocument<{ callsign?: string }>(`users/${user.uid}`);
+        if (userDoc?.callsign) {
+          userCallsign = userDoc.callsign;
+          setCallsign(userCallsign);
+        }
+      } catch { /* callsign is optional — proceed without it */ }
 
       try {
         const data = await getDocument<Record<string, unknown>>(`users/${user.uid}/personalization/data`);
         if (data) {
-          // Format height/weight as compact strings (e.g. "180cm", "75kg")
+          // Format height/weight as compact strings (e.g. "180cm", "75kg", "5'9\"")
           const fmtMeasure = (m: unknown): string | undefined => {
             const measure = m as { value?: string; unit?: string } | undefined;
-            return measure?.value ? `${measure.value}${measure.unit || ""}` : undefined;
+            if (!measure?.value) return undefined;
+            // Feet values stored as "5'9" — display as 5'9" instead of "5'9ft"
+            if (measure.unit === "ft" && measure.value.includes("'")) {
+              return `${measure.value}"`;
+            }
+            return `${measure.value}${measure.unit || ""}`;
           };
           const equipRaw = data.equipmentAccess;
           const equipStr = Array.isArray(equipRaw) ? equipRaw.join(",") : (equipRaw as string);
@@ -390,16 +467,13 @@ export default function AIAgent() {
         console.warn("Failed to load personalization:", err);
       }
 
-      // Load active program
+      // Query active program directly — the real-time listener may not have fired yet
       try {
         const programs = await queryCollection<Program & { id: string; active: boolean }>(
           `users/${user.uid}/programs`,
           [where("active", "==", true), limit(1)]
         );
-        if (programs[0]) {
-          program = programs[0];
-          setActiveProgram(program);
-        }
+        program = programs[0] ?? null;
       } catch (err) {
         console.warn("Failed to load active program:", err);
       }
@@ -465,9 +539,13 @@ export default function AIAgent() {
         console.warn("Failed to load modification history:", err);
       }
 
+      // Persist to refs for reinitialization during tool session switches
+      recentWorkoutsRef.current = recentWorkouts;
+      recentModificationsRef.current = recentModifications;
+
       // Initialize Gemini with full context + conversation history (Firestore > localStorage)
       const savedHistory = await loadChatHistory(user.uid);
-      initializeGemini(agent, profile, program, recentWorkouts, recentModifications, savedHistory || undefined);
+      initializeGemini(agent, profile, program, recentWorkouts, recentModifications, savedHistory || undefined, userCallsign);
 
       // If Firestore had newer history, update in-memory messages
       const localHistory = loadChatHistoryLocal();
@@ -479,8 +557,23 @@ export default function AIAgent() {
       if (!savedHistory || savedHistory.length === 0) {
         setMessages([
           { type: "system", text: "COMMAND CHANNEL ESTABLISHED", timestamp: getTimestamp() },
-          { type: "ai", text: getAgentWelcome(agent), timestamp: getTimestamp() },
+          { type: "ai", text: getAgentWelcome(agent, userCallsign), timestamp: getTimestamp() },
         ]);
+      }
+
+      // Auto-send pending prompt (e.g. from "Generate New Protocol" button on Dashboard)
+      const pendingPrompt = localStorage.getItem("stride_agent_prompt");
+      if (pendingPrompt) {
+        localStorage.removeItem("stride_agent_prompt");
+        // Small delay to let Gemini session initialize
+        setTimeout(() => {
+          setInput(pendingPrompt);
+          // Trigger send on next tick after input is set
+          setTimeout(() => {
+            const sendBtn = document.querySelector("[data-agent-send]") as HTMLButtonElement;
+            sendBtn?.click();
+          }, 100);
+        }, 500);
       }
     };
 
@@ -488,27 +581,38 @@ export default function AIAgent() {
   }, [user, initializeGemini]);
 
   const handleSend = async () => {
-    if (!input.trim() || isThinking) return;
+    if (!input.trim() || isThinking || pendingProposal) return;
 
     // Rate limit: 2 seconds between messages
     const now = Date.now();
     if (now - lastSendRef.current < 2000) return;
     lastSendRef.current = now;
 
-    // Daily message limit (prevents runaway Gemini costs per user)
+    // Daily message limit — Firestore-backed (enforced by security rules, max 100/day)
     const DAILY_LIMIT = 100;
-    const todayKey = new Date().toISOString().split("T")[0];
-    const storageKey = `stride_msg_${todayKey}`;
-    const dailyCount = parseInt(localStorage.getItem(storageKey) || "0", 10);
-    if (dailyCount >= DAILY_LIMIT) {
-      setMessages(prev => [...prev, {
-        type: "system" as const,
-        text: "DAILY COMMS LIMIT REACHED — 100 transmissions per cycle. Resets at 0000.",
-        timestamp: getTimestamp(),
-      }]);
-      return;
+    const todayKey = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD local date
+    if (user) {
+      try {
+        const rateLimitDoc = await getDocument<{ count: number }>(`users/${user.uid}/rateLimits/${todayKey}`);
+        const currentCount = rateLimitDoc?.count ?? 0;
+        if (currentCount >= DAILY_LIMIT) {
+          setMessages(prev => [...prev, {
+            type: "system" as const,
+            text: "DAILY COMMS LIMIT REACHED — 100 transmissions per cycle. Resets at 0000.",
+            timestamp: getTimestamp(),
+          }]);
+          return;
+        }
+        // Increment counter atomically (security rules enforce max 100 and +1 only)
+        if (rateLimitDoc) {
+          await updateDocument(`users/${user.uid}/rateLimits/${todayKey}`, { count: increment(1) });
+        } else {
+          await setDocument(`users/${user.uid}/rateLimits/${todayKey}`, { count: 1 }, false);
+        }
+      } catch {
+        // If rate limit check fails, allow the message (don't block on infra issues)
+      }
     }
-    localStorage.setItem(storageKey, String(dailyCount + 1));
 
     const userMessage: Message = {
       type: "user",
@@ -531,40 +635,50 @@ export default function AIAgent() {
     } catch (geminiErr) {
       console.warn("[AIAgent] Gemini failed, using template fallback:", geminiErr);
       const errMsg = (geminiErr as { message?: string }).message || "";
-      // If rate limited, tell the user instead of giving random motivational text
       if (errMsg.includes("429") || errMsg.includes("quota")) {
+        // Rate limited — fall back to template so user always gets a response
         setMessages(prev => [...prev, {
           type: "system",
-          text: "NEURAL LINK THROTTLED — high traffic. Retry in 30s.",
+          text: "NEURAL LINK REDUCED — switching to local protocol.",
           timestamp: getTimestamp(),
         }]);
+        handleTemplateFallback(userInput);
+      } else {
+        handleTemplateFallback(userInput);
       }
-      handleTemplateFallback(userInput);
     } finally {
       setIsThinking(false);
     }
   };
 
-  /** Send a message with 30s timeout and one retry on 429 rate limit */
+  /** Send a message with 30s timeout and up to 2 retries on 429 rate limit */
   const sendWithRetry = async (session: ChatSession, message: string | Parameters<ChatSession["sendMessage"]>[0]) => {
     const withTimeout = (promise: Promise<unknown>) =>
       Promise.race([
         promise,
         new Promise((_, reject) => setTimeout(() => reject(new Error("Request timeout — neural link lost.")), 30000)),
       ]);
-    try {
-      return await withTimeout(session.sendMessage(message)) as Awaited<ReturnType<ChatSession["sendMessage"]>>;
-    } catch (err: unknown) {
-      const msg = (err as { message?: string }).message || "";
-      // Retry once on 429 after the suggested delay (or 5s default)
-      if (msg.includes("429")) {
-        const delayMatch = msg.match(/retry in ([\d.]+)s/i);
-        const delaySec = delayMatch ? Math.min(parseFloat(delayMatch[1]), 10) : 5;
-        await new Promise((r) => setTimeout(r, delaySec * 1000));
+
+    const MAX_RETRIES = 2;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
         return await withTimeout(session.sendMessage(message)) as Awaited<ReturnType<ChatSession["sendMessage"]>>;
+      } catch (err: unknown) {
+        lastErr = err;
+        const msg = (err as { message?: string }).message || "";
+        if (msg.includes("429") && attempt < MAX_RETRIES) {
+          // Exponential backoff: 5s → 10s (capped from suggested delay)
+          const delayMatch = msg.match(/retry in ([\d.]+)s/i);
+          const baseSec = delayMatch ? parseFloat(delayMatch[1]) : 5;
+          const delaySec = Math.min(baseSec * (attempt + 1), 15);
+          await new Promise((r) => setTimeout(r, delaySec * 1000));
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
+    throw lastErr;
   };
 
   /** Handle a single function call result — may trigger chained calls */
@@ -610,8 +724,17 @@ export default function AIAgent() {
           timestamp: getTimestamp(),
           programData: {
             name: actionResult.data.name as string,
-            weeks: actionResult.data.weeks as ProgramWeekData[],
+            weeks: actionResult.data.weeks as Week[],
           },
+        };
+        setMessages(prev => [...prev, msg]);
+      } else if ((normalizedName === "generateBonusWorkout" || normalizedName === "loadDayWorkout") && actionResult.data.bonusWorkout) {
+        const bonus = actionResult.data.bonusWorkout as Message["bonusWorkout"];
+        const msg: Message = {
+          type: "ai",
+          text,
+          timestamp: getTimestamp(),
+          bonusWorkout: bonus,
         };
         setMessages(prev => [...prev, msg]);
       } else {
@@ -620,7 +743,9 @@ export default function AIAgent() {
     } else {
       // Write action — show proposal for user confirmation
       const proposal = actionResult.proposal;
+      const pid = `proposal-${Date.now()}`;
       setPendingProposal(proposal);
+      setPendingProposalId(pid);
 
       const proposalMsg: Message = {
         type: "proposal",
@@ -637,7 +762,7 @@ export default function AIAgent() {
             dayLabel: e.dayLabel,
           })),
         },
-        proposalId: `proposal-${Date.now()}`,
+        proposalId: pid,
       };
       setMessages(prev => [...prev, proposalMsg]);
     }
@@ -651,35 +776,70 @@ export default function AIAgent() {
     // Use tool session if: keyword match, OR we're mid-tool-conversation (follow-up like "back and arms")
     const useTools = needsTools(userInput) || toolConversationRef.current;
 
-    // Pick the right session
-    let session = useTools ? toolSession : chatSession;
+    // Check if behavior state changed since last init (e.g., workout completed between messages)
+    const currentBehavior = getBehaviorState();
+    const currentKey = `${currentBehavior.streakDays}-${currentBehavior.totalWorkoutsCompleted}-${currentBehavior.alignmentScore}`;
+    let freshSessions: ReturnType<typeof initializeGemini> = null;
+    if (currentKey !== lastBehaviorKeyRef.current) {
+      // Behavior changed — reinit sessions with fresh context and use them immediately
+      freshSessions = initializeGemini(currentAgent, userProfile, activeProgram, recentWorkoutsRef.current, recentModificationsRef.current, messagesRef.current);
+    }
+
+    // Pick the right session — prefer freshly initialized sessions over stale state
+    let session = freshSessions
+      ? (useTools ? freshSessions.tools : freshSessions.chat)
+      : (useTools ? toolSession : chatSession);
 
     // Reinitialize if no session (pass current messages for history continuity)
     if (!session) {
-      const sessions = initializeGemini(currentAgent, userProfile, activeProgram, undefined, undefined, messages);
+      const sessions = initializeGemini(currentAgent, userProfile, activeProgram, recentWorkoutsRef.current, recentModificationsRef.current, messages);
       if (!sessions) throw new Error("Gemini init failed");
       session = useTools ? sessions.tools : sessions.chat;
     }
 
-    const result = await sendWithRetry(session, userInput);
+    // Inject conversation mode + friction context into the message for behavioral adaptation
+    const mode = detectMode(userInput);
+    const friction = shouldDeliverFriction();
+    lastFrictionRef.current = friction; // cache for deliverFriction() — prevents double evaluation
+    // Strip any bracket tags from user input to prevent prompt injection
+    const sanitizedInput = userInput.replace(/\[(?:MODE|FRICTION|SYSTEM|ADMIN|TOOL):[^\]]*\]/gi, '');
+    let enrichedInput = sanitizedInput;
+    if (mode !== "clarification" || friction.eligible) {
+      const tags: string[] = [];
+      if (mode && mode !== "clarification") tags.push(`[MODE:${mode.toUpperCase()}]`);
+      if (friction.eligible) tags.push(`[FRICTION:${friction.flag}]`);
+      enrichedInput = `${tags.join(" ")} ${sanitizedInput}`;
+    }
+
+    const result = await sendWithRetry(session, enrichedInput);
     const response = result.response;
     const functionCalls = response.functionCalls();
 
     if (functionCalls && functionCalls.length > 0) {
       toolConversationRef.current = true; // stay on tool session for follow-ups
-      await handleFunctionCall(session, functionCalls[0], 0);
+      // Process all function calls (Gemini may return multiple in one response)
+      for (const fc of functionCalls) {
+        await handleFunctionCall(session, fc, 0);
+      }
     } else {
       const text = safeText(response);
       if (!text) throw new Error("Empty Gemini response");
 
       // Detect if Gemini output a function call as text instead of using proper function calling.
-      // Catches both formats: functionName( and JSON {"tool_name": "functionName"} / {"tool_code": "functionName"}
-      const KNOWN_TOOLS = "getActiveProgram|swapExercise|adjustVolume|skipWorkoutDay|regenerateDay|regenerateWeek|generateDeloadWeek|getRecentPerformance";
+      // Catches: functionName(, `functionName`, "Calling functionName", JSON {"tool_name":"functionName"}
+      // Also catches: agent CLAIMING it did something ("I've generated", "loaded and ready", "created your workout")
+      const KNOWN_TOOLS = AGENT_TOOL_NAMES.join("|");
       const textCallMatch = text.match(new RegExp(`\\b(${KNOWN_TOOLS})\\s*\\(`)) ||
+        text.match(new RegExp(`\`(${KNOWN_TOOLS})\``)) ||
+        text.match(new RegExp(`(?:calling|invoke|execute|use|run)\\s+\`?(${KNOWN_TOOLS})\`?`, "i")) ||
         text.match(new RegExp(`"(?:tool_name|tool_code)"\\s*:\\s*"(${KNOWN_TOOLS})"`));
-      if (textCallMatch && toolSession) {
+      // Detect hallucinated action claims — agent says it did something without calling a tool
+      const actionClaimMatch = !textCallMatch && useTools &&
+        /\b(i('ve|\s+have)\s+(generated|created|built|loaded|modified|updated|swapped|replaced|adjusted|regenerated|added|removed)|it\s+is\s+loaded|loaded\s+and\s+ready|ready\s+for\s+execution|protocol\s+updated|changes?\s+applied)\b/i.test(text);
+      if ((textCallMatch || actionClaimMatch) && toolSession) {
         // Re-send to tool session so it can make the actual function call
-        const retryResult = await sendWithRetry(toolSession, userInput);
+        // Use sanitized input (not raw userInput) to preserve prompt injection protection
+        const retryResult = await sendWithRetry(toolSession, sanitizedInput);
         const retryFCs = retryResult.response.functionCalls();
         if (retryFCs && retryFCs.length > 0) {
           toolConversationRef.current = true;
@@ -697,18 +857,23 @@ export default function AIAgent() {
       }
 
       // If agent asked a follow-up question (like "what focus?"), keep tool conversation alive
+      // Otherwise reset — the agent gave a definitive text response without calling a tool
       if (text.includes("?") && useTools) {
         toolConversationRef.current = true;
-      } else if (!useTools) {
+      } else {
         toolConversationRef.current = false;
       }
 
-      // Strip any leaked tool JSON blocks from displayed text
+      // Strip any leaked tool calls / JSON blocks from displayed text
+      const toolNamePattern = AGENT_TOOL_NAMES.join("|");
       const cleanText = text
         .replace(/```json\s*\{[\s\S]*?"(?:tool_name|tool_code)"[\s\S]*?\}\s*```/g, "")
         .replace(/\{[\s\S]*?"(?:tool_name|tool_code)"[\s\S]*?\}/g, "")
+        .replace(new RegExp(`(?:calling|invoke|execute|use|run)\\s+\`?(?:${toolNamePattern})\`?\\s*(?:with\\s+[^\\.]*\\.?)?`, "gi"), "")
+        .replace(new RegExp(`\`(?:${toolNamePattern})\``, "g"), "")
         .trim();
-      const mode = detectMode(userInput);
+      // Reuse `mode` from line above (already computed) — don't call detectMode again
+      // (it uses Math.random() for pattern reflection, would produce different result)
       addAgentMessage(cleanText || text, mode);
     }
 
@@ -733,8 +898,13 @@ export default function AIAgent() {
     }]);
   };
 
+  /** Cached friction result from the current message cycle — prevents double evaluation */
+  const lastFrictionRef = useRef<ReturnType<typeof shouldDeliverFriction> | null>(null);
+
   const deliverFriction = () => {
-    const frictionDecision = shouldDeliverFriction();
+    // Use pre-computed result if available (from handleGeminiSend), otherwise compute fresh
+    const frictionDecision = lastFrictionRef.current ?? shouldDeliverFriction();
+    lastFrictionRef.current = null; // clear for next cycle
     if (frictionDecision.eligible) {
       setTimeout(() => {
         setMessages(prev => [...prev, {
@@ -743,6 +913,7 @@ export default function AIAgent() {
           timestamp: getTimestamp(),
           mode: `friction:${frictionDecision.flag}`,
         }]);
+        recordFrictionDelivered();
 
         if (frictionDecision.agent !== currentAgent) {
           setMessages(prev => [...prev, {
@@ -764,6 +935,26 @@ export default function AIAgent() {
       // Execute the Firestore write
       await pendingProposal.execute();
 
+      // Update behavior state for specific actions
+      if (pendingProposal.actionName === "skipWorkoutDay") {
+        const { recordWorkoutSkipped } = await import("../utils/behaviorStore");
+        recordWorkoutSkipped();
+        // Write a skipped workoutLog so refreshWorkoutCounts can track it from Firestore
+        if (user) {
+          const { toLocalISO } = await import("../utils/dateUtils");
+          setDocument(`users/${user.uid}/workoutLogs/skip_${Date.now()}`, {
+            workoutName: "Skipped Day",
+            exercises: [],
+            duration: 0,
+            completedAt: toLocalISO(new Date()),
+            completionType: "skipped",
+          }).catch(console.warn);
+        }
+      } else if (pendingProposal.actionName === "generateDeloadWeek") {
+        const { recordDeloadComplete } = await import("../utils/behaviorStore");
+        recordDeloadComplete();
+      }
+
       // Log the modification for future agent context
       if (user) {
         const modId = `mod_${Date.now()}`;
@@ -776,26 +967,26 @@ export default function AIAgent() {
       }
 
       // Send success back to Gemini so it can confirm in character
+      // Use originalName if available (Gemini may have sent snake_case)
+      const responseName = pendingProposal.originalName || pendingProposal.actionName;
       const followUp = await toolSession.sendMessage([{
         functionResponse: {
-          name: pendingProposal.actionName,
+          name: responseName,
           response: { success: true, message: "Changes applied successfully." },
         },
       }]);
 
       const text = safeText(followUp.response) || "Protocol updated. Changes applied.";
 
-      // Refresh active program to get the updated data
+      // Fetch updated program for inline display + Gemini reinit
+      // (real-time listener also updates activeProgram state automatically)
       let updatedProgram: (Program & { id: string }) | null = null;
       if (user) {
         const programs = await queryCollection<Program & { id: string; active: boolean }>(
           `users/${user.uid}/programs`,
           [where("active", "==", true), limit(1)]
         );
-        if (programs[0]) {
-          updatedProgram = programs[0];
-          setActiveProgram(updatedProgram);
-        }
+        if (programs[0]) updatedProgram = programs[0];
       }
 
       // Extract the edited section from the proposal description to show updated data
@@ -849,8 +1040,25 @@ export default function AIAgent() {
         text: "PROTOCOL UPDATED",
         timestamp: getTimestamp(),
       }]);
+
+      // Re-initialize Gemini sessions with updated program so next messages use fresh context
+      if (updatedProgram) {
+        initializeGemini(currentAgent, userProfile, updatedProgram, recentWorkoutsRef.current, recentModificationsRef.current, messagesRef.current);
+      }
     } catch (err) {
       console.warn("[AIAgent] Confirm action failed:", err);
+      // Send failure response to keep tool session in valid state
+      try {
+        if (toolSession && pendingProposal) {
+          const failName = pendingProposal.originalName || pendingProposal.actionName;
+          await toolSession.sendMessage([{
+            functionResponse: {
+              name: failName,
+              response: { success: false, message: "Execution failed." },
+            },
+          }]);
+        }
+      } catch { /* best effort recovery */ }
       setMessages(prev => [...prev, {
         type: "system",
         text: "ACTION FAILED — protocol unchanged",
@@ -858,6 +1066,7 @@ export default function AIAgent() {
       }]);
     } finally {
       setPendingProposal(null);
+      setPendingProposalId(null);
       setIsThinking(false);
     }
   };
@@ -868,9 +1077,10 @@ export default function AIAgent() {
 
     try {
       if (toolSession) {
+        const rejectName = pendingProposal.originalName || pendingProposal.actionName;
         const followUp = await toolSession.sendMessage([{
           functionResponse: {
-            name: pendingProposal.actionName,
+            name: rejectName,
             response: { success: false, message: "Operator rejected the proposed changes." },
           },
         }]);
@@ -882,10 +1092,12 @@ export default function AIAgent() {
       addAgentMessage("Understood. Protocol unchanged.");
     } finally {
       setPendingProposal(null);
+      setPendingProposalId(null);
     }
   };
 
   const handleQuickCommand = (command: string) => {
+    if (isThinking || pendingProposal) return;
     setInput(command);
     inputRef.current?.focus();
   };
@@ -898,13 +1110,14 @@ export default function AIAgent() {
     setCurrentAgent(selectedAgent);
     setShowAgentModal(false);
     setPendingProposal(null);
+    setPendingProposalId(null);
     toolConversationRef.current = false;
-    initializeGemini(selectedAgent, userProfile, activeProgram, undefined, undefined, messages);
+    initializeGemini(selectedAgent, userProfile, activeProgram, recentWorkoutsRef.current, recentModificationsRef.current, messagesRef.current);
     // Add system message for agent switch
     setMessages(prev => [
       ...prev,
       { type: "system", text: `AGENT SWITCHED: ${agentData[selectedAgent].name} — ${agentData[selectedAgent].title}`, timestamp: getTimestamp() },
-      { type: "ai", text: getAgentWelcome(selectedAgent), timestamp: getTimestamp() },
+      { type: "ai", text: getAgentWelcome(selectedAgent, callsign), timestamp: getTimestamp() },
     ]);
     // Persist to Firestore
     if (user) {
@@ -950,8 +1163,32 @@ export default function AIAgent() {
               Online · {agentData[currentAgent].name} Active
             </div>
           </div>
-          <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wide">
-            Alignment: {getBehaviorState().alignmentScore}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={async () => {
+                const now = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+                setMessages([
+                  { type: "system", text: "TERMINAL CLEARED — HISTORY PURGED", timestamp: now },
+                  { type: "ai", text: getAgentWelcome(currentAgent, callsign), timestamp: now },
+                ]);
+                // Clear persisted history
+                localStorage.removeItem("stride_chat_history");
+                if (user) {
+                  deleteDocument(`users/${user.uid}/chatHistory/latest`).catch(() => {});
+                }
+                // Re-initialize Gemini sessions (fresh context)
+                if (userProfile) {
+                  initializeGemini(currentAgent, userProfile, activeProgram, recentWorkoutsRef.current, recentModificationsRef.current);
+                }
+              }}
+              className="font-['JetBrains_Mono',monospace] text-[8px] text-white/30 uppercase tracking-wide hover:text-[#ff6600] transition-colors"
+              title="Clear chat history"
+            >
+              [CLR]
+            </button>
+            <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wide">
+              Alignment: {getBehaviorState().alignmentScore}
+            </div>
           </div>
         </div>
       </div>
@@ -1012,6 +1249,36 @@ export default function AIAgent() {
                         ))}
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {/* Bonus workout preview + start button */}
+                {message.bonusWorkout && (
+                  <div className="border-t border-[#ff6600]/30 pt-3 mt-3">
+                    <div className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] uppercase tracking-wider mb-2">
+                      → {message.bonusWorkout.name}
+                    </div>
+                    <div className="space-y-1 mb-3">
+                      {message.bonusWorkout.exercises.map((ex, i) => (
+                        <div key={i} className="flex items-center justify-between text-[8px] border-b border-white/5 pb-0.5">
+                          <span className="font-['JetBrains_Mono',monospace] text-white/70">
+                            [{(i + 1).toString().padStart(2, '0')}] {ex.name}
+                          </span>
+                          <span className="font-['JetBrains_Mono',monospace] text-white/50">
+                            {ex.sets}x{ex.reps} • {ex.rest}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      onClick={() => {
+                        localStorage.setItem("stride_bonus_workout", JSON.stringify(message.bonusWorkout));
+                        navigate("/app");
+                      }}
+                      className="w-full border border-[#ff6600] bg-[#ff6600]/10 py-2 font-['JetBrains_Mono',monospace] text-[10px] text-[#ff6600] uppercase tracking-wider hover:bg-[#ff6600] hover:text-black transition-colors"
+                    >
+                      Start Bonus Calibration →
+                    </button>
                   </div>
                 )}
               </div>
@@ -1097,8 +1364,8 @@ export default function AIAgent() {
                   </div>
                 </div>
 
-                {/* Confirm/Reject buttons — only shown for active proposal */}
-                {pendingProposal && message.proposalId && (
+                {/* Confirm/Reject buttons — only shown for the matching active proposal */}
+                {pendingProposal && message.proposalId && message.proposalId === pendingProposalId && (
                   <div className="flex gap-3 pt-3 mt-3 border-t border-[#ff6600]/30">
                     <button
                       onClick={handleRejectAction}
@@ -1210,11 +1477,12 @@ export default function AIAgent() {
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSend(); } }}
             placeholder="Enter command..."
             className="flex-1 bg-transparent font-['JetBrains_Mono',monospace] text-[11px] text-white outline-none placeholder:text-white/40"
-            disabled={isThinking}
+            disabled={isThinking || !!pendingProposal}
           />
           <button
+            data-agent-send
             onClick={handleSend}
-            disabled={isThinking}
+            disabled={isThinking || !!pendingProposal}
             className="border border-[#ff6600] px-3 py-1 hover:bg-[#ff6600]/20 transition-colors disabled:opacity-50"
           >
             <span className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] uppercase tracking-wide">
@@ -1228,13 +1496,7 @@ export default function AIAgent() {
       {showAgentModal && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           {/* Scanline effect */}
-          <div
-            className="absolute inset-0 pointer-events-none opacity-[0.03]"
-            style={{
-              backgroundImage: `repeating-linear-gradient(0deg, transparent, transparent 1px, white 2px, white 2px)`,
-              backgroundSize: "100% 4px",
-            }}
-          />
+          <Scanline />
 
           <div className="relative bg-black border-2 border-[#ff6600] p-6 w-full max-w-[340px] max-h-[80vh] overflow-y-auto">
             {/* Header */}

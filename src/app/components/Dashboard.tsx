@@ -1208,6 +1208,7 @@ export default function Dashboard() {
             <div className="flex gap-2">
               <Link
                 to="/app/ai-agent"
+                onClick={() => localStorage.setItem("stride_agent_prompt", "My current program has expired. Generate me a new program based on my profile and goals.")}
                 className="flex-1 bg-[#ff6600] text-center text-black font-['JetBrains_Mono',monospace] text-[10px] font-bold uppercase tracking-wider py-3 hover:bg-[#ff8833] transition-colors"
               >
                 Generate New Protocol →

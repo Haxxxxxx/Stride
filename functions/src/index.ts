@@ -80,20 +80,32 @@ export const walletSignIn = onCall(async (request) => {
     });
     uid = newUser.uid;
 
-    // Write the wallet index (admin-only collection)
-    await walletIndexRef.set({
+    // Atomic batch write — both docs or neither
+    const batch = firestore.batch();
+    batch.set(walletIndexRef, {
       uid,
       walletAddress,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-
-    // Create default user doc
-    await firestore.doc(`users/${uid}`).set({
+    batch.set(firestore.doc(`users/${uid}`), {
       walletAddress,
       betaValidated: false,
       onboardingComplete: false,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+    try {
+      await batch.commit();
+    } catch (err: unknown) {
+      // If batch fails because walletIndex was created by a concurrent request, read the existing uid
+      const retryDoc = await walletIndexRef.get();
+      if (retryDoc.exists) {
+        // Clean up the orphaned Auth user we just created
+        await admin.auth().deleteUser(uid).catch(() => {});
+        uid = retryDoc.data()!.uid as string;
+      } else {
+        throw err; // Real error
+      }
+    }
   }
 
   // Create and return a custom token
@@ -160,6 +172,17 @@ export const sendSignInEmail = onCall(
     const continueUrl = request.data?.continueUrl;
     if (!continueUrl || typeof continueUrl !== "string") {
       throw new HttpsError("invalid-argument", "continueUrl is required.");
+    }
+
+    // Validate continueUrl origin to prevent open-redirect attacks
+    const allowedOrigins = ["https://stride-a333e.web.app", "https://stride-a333e.firebaseapp.com"];
+    try {
+      const url = new URL(continueUrl);
+      if (!allowedOrigins.includes(url.origin)) {
+        throw new HttpsError("invalid-argument", "Invalid redirect URL.");
+      }
+    } catch {
+      throw new HttpsError("invalid-argument", "Invalid redirect URL.");
     }
 
     // Rate limit: 1 email per 60s per address
@@ -307,25 +330,15 @@ If you didn't request access, ignore this message.`;
 async function aggregateStats(): Promise<void> {
   const firestore = admin.firestore();
 
-  // Count active operators (users with onboardingComplete)
-  const usersSnap = await firestore.collection("users").get();
-  const activeOperators = usersSnap.docs.filter(
-    (d) => d.data().onboardingComplete === true
-  ).length;
-  const totalOperators = usersSnap.size;
+  // Use Firestore count() aggregation queries instead of full document scans
+  const totalOperators = (await firestore.collection("users").count().get()).data().count;
+  const activeOperators = (await firestore.collection("users")
+    .where("onboardingComplete", "==", true).count().get()).data().count;
 
-  // Count total workout logs across all users
-  let totalWorkoutLogs = 0;
-  let completedWorkouts = 0;
-  for (const userDoc of usersSnap.docs) {
-    const logsSnap = await firestore
-      .collection(`users/${userDoc.id}/workoutLogs`)
-      .get();
-    totalWorkoutLogs += logsSnap.size;
-    completedWorkouts += logsSnap.docs.filter(
-      (d) => d.data().completionType === "completed"
-    ).length;
-  }
+  // Use collectionGroup queries with count() for subcollection aggregation
+  const totalWorkoutLogs = (await firestore.collectionGroup("workoutLogs").count().get()).data().count;
+  const completedWorkouts = (await firestore.collectionGroup("workoutLogs")
+    .where("completionType", "==", "full").count().get()).data().count;
 
   // Avg success rate (completed / total logged, default 0)
   const avgSuccessRate =
@@ -334,21 +347,13 @@ async function aggregateStats(): Promise<void> {
       : 0;
 
   // Count active squads
-  const squadsSnap = await firestore.collection("squads").get();
-  const activeSquads = squadsSnap.size;
+  const activeSquads = (await firestore.collection("squads").count().get()).data().count;
 
   // Count active challenges
-  const challengesSnap = await firestore.collection("challenges").get();
-  const activeChallenges = challengesSnap.size;
+  const activeChallenges = (await firestore.collection("challenges").count().get()).data().count;
 
-  // Count total programs generated
-  let totalPrograms = 0;
-  for (const userDoc of usersSnap.docs) {
-    const programsSnap = await firestore
-      .collection(`users/${userDoc.id}/programs`)
-      .get();
-    totalPrograms += programsSnap.size;
-  }
+  // Count total programs generated via collectionGroup
+  const totalPrograms = (await firestore.collectionGroup("programs").count().get()).data().count;
 
   await firestore.doc("platformStats/current").set({
     activeOperators,
@@ -362,14 +367,103 @@ async function aggregateStats(): Promise<void> {
   });
 }
 
-/** Firestore trigger: refresh stats when any user doc changes */
+/**
+ * Firestore trigger: refresh stats when any user doc changes.
+ * Debounced: skips if stats were refreshed within the last 5 minutes
+ * to prevent read amplification (full table scan on every write).
+ */
 export const onUserChange = onDocumentWritten("users/{uid}", async () => {
+  const firestore = admin.firestore();
+  const statsRef = firestore.doc("platformStats/current");
+  const statsSnap = await statsRef.get();
+  if (statsSnap.exists) {
+    const lastUpdate = statsSnap.data()?.updatedAt?.toMillis?.() ?? 0;
+    if (Date.now() - lastUpdate < 5 * 60 * 1000) return; // skip if < 5min ago
+  }
   await aggregateStats();
 });
 
-/** Callable: manually trigger stats refresh */
-export const triggerStatsRefresh = onCall(async () => {
+const ADMIN_EMAILS = ["vinc.charles0@gmail.com"];
+
+/** Callable: manually trigger stats refresh (admin only) */
+export const triggerStatsRefresh = onCall(async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  if (!ADMIN_EMAILS.includes(request.auth.token?.email || "")) {
+    throw new HttpsError("permission-denied", "Admin access required.");
+  }
   await aggregateStats();
   return { success: true };
 });
 
+/**
+ * One-time backfill: sync avatarUrl, callsign, stats, AND calculated progress
+ * from user docs to all challenge participant docs.
+ */
+export const backfillParticipantProfiles = onCall(async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  if (!ADMIN_EMAILS.includes(request.auth.token?.email || "")) {
+    throw new HttpsError("permission-denied", "Admin access required.");
+  }
+  const firestore = admin.firestore();
+  const challengesSnap = await firestore.collection("challenges").get();
+  let updated = 0;
+
+  for (const challengeDoc of challengesSnap.docs) {
+    const challenge = challengeDoc.data();
+    const targetType = challenge.targetType as string;
+    const target = (challenge.target as number) || 80;
+
+    const participantsSnap = await firestore
+      .collection(`challenges/${challengeDoc.id}/participants`)
+      .get();
+
+    for (const participantDoc of participantsSnap.docs) {
+      const uid = participantDoc.id;
+      const userDoc = await firestore.doc(`users/${uid}`).get();
+      if (!userDoc.exists) continue;
+
+      const userData = userDoc.data()!;
+      const avatarUrl = userData.avatarUrl ?? "";
+      const callsign = userData.callsign ?? "";
+
+      // Pull behavior state for stats + progress calculation
+      const behaviorDoc = await firestore.doc(`users/${uid}/behaviorState/data`).get();
+      const b = behaviorDoc.exists ? behaviorDoc.data()! : {};
+
+      const streakDays = (b.streakDays as number) ?? 0;
+      const totalWorkoutsCompleted = (b.totalWorkoutsCompleted as number) ?? 0;
+      const alignmentScore = (b.alignmentScore as number) ?? 50;
+      // Use 14d rolling counters for consistency (matches client-side syncChallengeProgress)
+      const workoutsCompleted14d = (b.workoutsCompleted14d as number) ?? (b.workoutsCompletedThisWeek as number) ?? 0;
+      const workoutsSkipped14d = (b.workoutsSkipped14d as number) ?? (b.workoutsSkippedThisWeek as number) ?? 0;
+
+      // Calculate progress based on challenge targetType
+      let progress = 0;
+      switch (targetType) {
+        case "consistency": {
+          const total = workoutsCompleted14d + workoutsSkipped14d;
+          progress = total > 0 ? Math.round((workoutsCompleted14d / total) * 100) : 0;
+          break;
+        }
+        case "streak":
+          progress = Math.min(Math.round((streakDays / target) * 100), 100);
+          break;
+        case "workouts":
+          progress = Math.min(Math.round((totalWorkoutsCompleted / target) * 100), 100);
+          break;
+      }
+
+      await participantDoc.ref.update({
+        avatarUrl,
+        callsign,
+        streakDays,
+        totalWorkoutsCompleted,
+        alignmentScore,
+        progress: Math.min(Math.round(progress), 100),
+      });
+      updated++;
+    }
+  }
+
+  return { success: true, updated };
+});

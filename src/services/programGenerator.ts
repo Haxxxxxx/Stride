@@ -193,7 +193,9 @@ export async function generateProgram(data: PersonalizationData): Promise<Progra
       45000,
       "Gemini program generation"
     );
-    const text = result.response.text();
+    let text = result.response.text();
+    // Strip markdown code fences if present (Gemini often wraps JSON in ```json ... ```)
+    text = text.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
     const program = JSON.parse(text) as Program;
 
     if (!program.name || !program.weeks?.length) {

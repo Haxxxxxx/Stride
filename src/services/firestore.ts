@@ -17,15 +17,25 @@ import {
   type QueryConstraint,
   type Unsubscribe,
 } from "firebase/firestore";
-import { db, auth } from "./firebase";
+import { db, auth, appCheck } from "./firebase";
+
+// Cache the App Check token promise so we only wait once
+let appCheckReady: Promise<void> | null = null;
 
 /**
- * Wait for Firebase Auth to have a valid ID token before Firestore operations.
- * After sign-in (popup, custom token, redirect), there's a brief window where
- * auth.currentUser exists but Firestore hasn't received the token yet.
- * If auth.currentUser is null, waits up to 2s for onAuthStateChanged to fire.
+ * Wait for Firebase Auth + App Check to be ready before Firestore operations.
+ * App Check enforcement rejects requests that arrive before the token exchange completes.
  */
 async function ensureAuthReady(): Promise<void> {
+  // Wait for App Check token (once) — required when enforcement is enabled
+  if (appCheck && !appCheckReady) {
+    appCheckReady = import("firebase/app-check")
+      .then(({ getToken }) => getToken(appCheck!, false))
+      .then(() => {})
+      .catch(() => {}); // non-fatal — let Firestore rules decide
+  }
+  if (appCheckReady) await appCheckReady;
+
   if (auth.currentUser) {
     await auth.currentUser.getIdToken();
     return;
@@ -95,19 +105,32 @@ export function subscribeToDocument<T = DocumentData>(
   callback: (data: T | null) => void
 ): Unsubscribe {
   return onSnapshot(doc(db, path), (snap) => {
-    callback(snap.exists() ? (snap.data() as T) : null);
+    callback(snap.exists() ? ({ id: snap.id, ...snap.data() } as T) : null);
+  }, (err) => {
+    console.warn(`[Firestore] subscribeToDocument error (${path}):`, err.message);
   });
 }
 
-// Real-time collection listener
+// Real-time collection listener with change detection (prevents unnecessary re-renders)
 export function subscribeToCollection<T = DocumentData>(
   path: string,
   constraints: QueryConstraint[],
   callback: (data: T[]) => void
 ): Unsubscribe {
   const q = query(collection(db, path), ...constraints);
+  let lastJson = "";
+  // Normalize Firestore Timestamps to seconds for stable JSON comparison
+  const replacer = (_: string, v: unknown) =>
+    v && typeof v === 'object' && 'seconds' in v && 'nanoseconds' in v ? (v as {seconds: number}).seconds : v;
   return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }) as T));
+    const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as T);
+    const json = JSON.stringify(data, replacer);
+    if (json !== lastJson) {
+      lastJson = json;
+      callback(data);
+    }
+  }, (err) => {
+    console.warn(`[Firestore] subscribeToCollection error (${path}):`, err.message);
   });
 }
 
@@ -136,6 +159,7 @@ export async function ensureUserDoc(uid: string, extra?: Record<string, unknown>
 }
 
 // Atomic batch write — all-or-nothing for multiple document operations
+// Automatically chunks into multiple batches if operations exceed Firestore's 500-op limit
 export async function batchWrite(
   operations: Array<{
     type: "set" | "update" | "delete";
@@ -146,18 +170,22 @@ export async function batchWrite(
 ): Promise<void> {
   await ensureAuthReady();
   const { writeBatch } = await import("firebase/firestore");
-  const batch = writeBatch(db);
-  for (const op of operations) {
-    const ref = doc(db, op.path);
-    if (op.type === "delete") {
-      batch.delete(ref);
-    } else if (op.type === "set") {
-      batch.set(ref, { ...op.data!, updatedAt: serverTimestamp() }, { merge: op.merge ?? true });
-    } else {
-      batch.update(ref, { ...op.data!, updatedAt: serverTimestamp() });
+  const BATCH_LIMIT = 499;
+  for (let i = 0; i < operations.length; i += BATCH_LIMIT) {
+    const chunk = operations.slice(i, i + BATCH_LIMIT);
+    const batch = writeBatch(db);
+    for (const op of chunk) {
+      const ref = doc(db, op.path);
+      if (op.type === "delete") {
+        batch.delete(ref);
+      } else if (op.type === "set") {
+        batch.set(ref, { ...op.data!, updatedAt: serverTimestamp() }, { merge: op.merge ?? true });
+      } else {
+        batch.update(ref, { ...op.data!, updatedAt: serverTimestamp() });
+      }
     }
+    await batch.commit();
   }
-  await batch.commit();
 }
 
 // Re-export constraint builders for convenience

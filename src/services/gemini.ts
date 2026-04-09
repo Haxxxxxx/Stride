@@ -173,6 +173,17 @@ const agentTools: FunctionDeclaration[] = [
     } as ObjectSchemaRequest,
   },
   {
+    name: "generateNewProgram",
+    description: "Generate a completely new multi-week training program from scratch, replacing the current one. Use when the user's program has expired/completed, or they explicitly want a fresh program (e.g. 'new program', 'generate a new protocol', 'start over', 'my program expired'). This creates a full periodized program based on the user's profile.",
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        focus: { type: SchemaType.STRING, description: "Optional focus or theme for the new program (e.g. 'strength', 'hypertrophy', 'cut')" },
+      },
+      required: [],
+    } as ObjectSchemaRequest,
+  },
+  {
     name: "logActivity",
     description: "Log a quick activity (run, walk, bike, swim, hike, yoga, sport, etc.) to the user's training history WITHOUT launching a full workout session. Use this when the user wants to RECORD an activity they did or are about to do, not when they want a structured workout generated.",
     parameters: {
@@ -226,7 +237,8 @@ const TOOL_PATTERNS = [
   /\b(adjust|increase|decrease|lower|raise|more|fewer)\s+(sets|reps|volume|rest|weight)\b/i, // adjust volume
   /\b(skip|cancel)\s+(today|tomorrow|this\s+day|my\s+workout)\b/i,                 // skip today
   /\b(deload|lighter\s+week|recovery\s+week|easier\s+week)\b/i,                    // deload
-  /\b(generate|create|give\s+me|build|make)\s+(?:\w+\s+){0,6}(workout|session|routine|program)\b/i, // generate a workout
+  /\b(generate|create|give\s+me|build|make)\s+(?:\w+\s+){0,6}(workout|session|routine|program|protocol)\b/i, // generate a workout/program
+  /\b(program|protocol)\s+(has\s+)?(expired|completed|ended|finished)\b/i,            // program expired
   /\b\d+\s*[-–]?\s*(module|exercise|move)\s+\w+\s+workout\b/i,                     // 8 module back workout
   /\b(how('s| is))\s+my\s+\w+\s+(progress|trending|doing)\b/i,                     // how's my bench progressing
   /\bshow\s+(my\s+)?(progress|performance|history|stats)\b/i,                       // show my progress
