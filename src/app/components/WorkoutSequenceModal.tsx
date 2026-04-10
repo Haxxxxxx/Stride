@@ -10,6 +10,7 @@ import {
   recordReflection,
   getBehaviorState,
   updateBehaviorState,
+  refreshWorkoutCounts,
 } from "../utils/behaviorStore";
 import { useAuth } from "../contexts/AuthContext";
 import { setDocument } from "../../services/firestore";
@@ -271,6 +272,13 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
   const closePiP = useCallback(() => {
     if (pipIntervalRef.current) { clearInterval(pipIntervalRef.current); pipIntervalRef.current = null; }
     if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
+    // Stop the canvas capture stream so the browser releases the capture resource
+    if (pipVideoRef.current?.srcObject) {
+      (pipVideoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+      pipVideoRef.current.srcObject = null;
+    }
+    pipVideoRef.current = null;
+    pipCanvasRef.current = null;
     setIsPiP(false);
   }, []);
 
@@ -343,7 +351,71 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     wipStateRef.current = { status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, exercises };
   });
 
-  // Save WIP on unmount (e.g. user navigates away mid-workout) + beforeunload
+  // ============================================================
+  // Wake Lock — keep screen awake during active workout
+  // ============================================================
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const releaseWakeLock = () => { wakeLockRef.current?.release().catch(() => {}); wakeLockRef.current = null; };
+  useEffect(() => {
+    if (!isOpen) { releaseWakeLock(); return; }
+    if (status === "active" || status === "setLog" || status === "resting" || status === "transition") {
+      if ("wakeLock" in navigator && !wakeLockRef.current) {
+        navigator.wakeLock.request("screen").then((wl) => { wakeLockRef.current = wl; }).catch(() => {});
+      }
+    } else {
+      releaseWakeLock();
+    }
+    return releaseWakeLock;
+  }, [status, isOpen]);
+
+  // Re-acquire Wake Lock when page becomes visible again (mobile releases on hide)
+  useEffect(() => {
+    const reacquire = () => {
+      if (document.visibilityState === "visible" && "wakeLock" in navigator) {
+        const s = wipStateRef.current.status;
+        if (["active", "setLog", "resting", "transition"].includes(s) && !wakeLockRef.current) {
+          navigator.wakeLock.request("screen").then((wl) => { wakeLockRef.current = wl; }).catch(() => {});
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", reacquire);
+    return () => document.removeEventListener("visibilitychange", reacquire);
+  }, []);
+
+  // ============================================================
+  // Media Session — lock screen / notification shade info
+  // ============================================================
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    if (status === "active" || status === "resting" || status === "paused" || status === "setLog" || status === "transition") {
+      // Use timerRef instead of timer state to avoid re-registering handlers every second
+      const t = timerRef.current;
+      const mm = Math.floor(t / 60).toString().padStart(2, "0");
+      const ss = (t % 60).toString().padStart(2, "0");
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: exerciseName,
+        artist: `Set ${currentSet}/${targetSets} · ${mm}:${ss}`,
+        album: workoutName,
+      });
+      navigator.mediaSession.setActionHandler("pause", () => setStatus("paused"));
+      navigator.mediaSession.setActionHandler("play", () => setStatus("active"));
+    } else {
+      // Clear media session when workout is not active (prevents lock screen controls
+      // from pushing an ended workout back into paused state)
+      navigator.mediaSession.metadata = null;
+      navigator.mediaSession.setActionHandler("pause", null);
+      navigator.mediaSession.setActionHandler("play", null);
+    }
+    return () => {
+      if ("mediaSession" in navigator) {
+        navigator.mediaSession.metadata = null;
+        navigator.mediaSession.setActionHandler("pause", null);
+        navigator.mediaSession.setActionHandler("play", null);
+      }
+    };
+  }, [status, exerciseName, currentSet, targetSets, workoutName]);
+
+  // Save WIP on unmount (e.g. user navigates away mid-workout) + beforeunload + visibilitychange
   useEffect(() => {
     const saveOnExit = () => {
       if (wipFinishedRef.current) return; // Session was intentionally ended — don't re-save
@@ -365,12 +437,20 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
         });
       }
     };
+    // Save WIP when page goes hidden (mobile app switch, lock screen)
+    // This is critical on mobile where beforeunload may not fire
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") saveOnExit();
+    };
     window.addEventListener("beforeunload", saveOnExit);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       window.removeEventListener("beforeunload", saveOnExit);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       // Component unmounting (navigation) — save if workout in progress
       saveOnExit();
-      // Clean up PiP on unmount
+      // Clean up timers + PiP on unmount
+      if (completionDelayRef.current) clearTimeout(completionDelayRef.current);
       if (pipIntervalRef.current) clearInterval(pipIntervalRef.current);
       if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
     };
@@ -446,6 +526,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                 exercises: wip.exerciseLogs,
                 duration: wip.timer,
                 completedAt: toLocalISO(new Date()),
+                completedAtMs: Date.now(),
                 completionType: "full",
                 readiness: wip.readiness,
                 totalVolume,
@@ -572,7 +653,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     const onVisible = () => { if (document.visibilityState === "visible") sync(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
-  }, [isTimed, status, currentSet, currentExerciseIdx, targetReps]);
+  }, [isTimed, status, currentSet, currentExerciseIdx, targetReps, exerciseOrder]);
 
   // Auto-advance to set log when countdown reaches 0
   useEffect(() => {
@@ -734,6 +815,8 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     // Reset set state for the new current exercise (same position, different exercise)
     setCurrentSet(1);
     setCurrentSetData([]);
+    // Clear countdown so a timed exercise's countdown doesn't auto-advance the new exercise
+    setCountdown(null);
     // Stay on "active" — the exercise at currentExerciseIdx is now the next one
   };
 
@@ -752,7 +835,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
 
     // If no exercises remain in the order, auto-complete
     if (newOrder.length === 0 || currentExerciseIdx >= newOrder.length) {
-      handleComplete(exerciseLogs, skippedExercises, newOrder);
+      handleComplete(exerciseLogs, skippedExercises, newOrder, newRemoved);
       return;
     }
 
@@ -799,11 +882,12 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     // Permanently remove (don't push to end)
     newOrder.splice(nextIdx, 1);
     setExerciseOrder(newOrder);
-    setRemovedExercises([...removedExercises, removedOriginalIdx]);
+    const newRemoved = [...removedExercises, removedOriginalIdx];
+    setRemovedExercises(newRemoved);
 
     if (nextIdx >= newOrder.length) {
       // No more exercises remain
-      handleComplete(exerciseLogs, skippedExercises, newOrder);
+      handleComplete(exerciseLogs, skippedExercises, newOrder, newRemoved);
       return;
     }
 
@@ -849,35 +933,41 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
       }
     }
 
-    // Firestore write is fire-and-forget (behavior state already updated above)
+    // Firestore write then refresh 14d counters from actual logs (corrects monotonic drift)
     if (user) {
       const logId = `log_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       setDocument(`users/${user.uid}/workoutLogs/${logId}`, {
         workoutName,
         exercises: logs,
-        duration: timer,
+        duration: timerRef.current,
         completedAt: toLocalISO(new Date()),
+        completedAtMs: Date.now(),
         completionType,
         readiness,
         totalVolume,
         avgRPE: Math.round(avgRPE * 10) / 10,
-      }).catch(console.warn);
+      }).then(() => refreshWorkoutCounts(user.uid).catch(console.warn))
+        .catch((err) => console.error("Workout log write failed:", err));
     }
   };
 
-  const handleComplete = (finalLogs: ExerciseLog[], currentSkipped?: number[], currentOrder?: number[]) => {
+  const handleComplete = (finalLogs: ExerciseLog[], currentSkipped?: number[], currentOrder?: number[], currentRemoved?: number[]) => {
     clearWIP(); wipFinishedRef.current = true; closePiP();
     // If no exercises were actually completed (all skipped/removed), close without saving
     if (finalLogs.length === 0) {
       onClose();
       return;
     }
-    // Capture order/skipped at call time to avoid stale closure from async setState
+    // Capture order/skipped/removed at call time to avoid stale closure from async setState
     const orderSnapshot = currentOrder ?? resolvedOrder;
     const skippedSnapshot = currentSkipped ?? skippedExercises;
+    const removedSnapshot = currentRemoved ?? removedExercises;
     // Count exercises that were actually in the workout (exclude removed ones)
-    const totalInWorkout = orderSnapshot.length + removedExercises.length;
-    const unskippedCount = totalInWorkout - new Set(skippedSnapshot).size - removedExercises.length;
+    // Filter out skipped indices that were also removed (avoid double-deduction)
+    const removedSet = new Set(removedSnapshot);
+    const activeSkipped = new Set([...skippedSnapshot].filter(i => !removedSet.has(i)));
+    const totalInWorkout = orderSnapshot.length + removedSnapshot.length;
+    const unskippedCount = totalInWorkout - activeSkipped.size - removedSnapshot.length;
     const completionType = finalLogs.length >= unskippedCount ? "full" : "partial";
     // Save immediately so data is never lost (even if user closes during animation)
     saveWorkoutLog(finalLogs, completionType);
@@ -1602,8 +1692,8 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                 className={`w-full bg-[#ff6600] text-black ${MONO} text-[12px] font-bold uppercase tracking-wider py-4 hover:bg-[#ff8833] transition-colors`}
               >
                 {isTimed && countdown !== null && countdown > 0
-                  ? `End Early · Log Set [{currentSet}/{targetSets}]`
-                  : `Set Complete · Log Data [{currentSet}/{targetSets}]`}
+                  ? `End Early · Log Set [${currentSet}/${targetSets}]`
+                  : `Set Complete · Log Data [${currentSet}/${targetSets}]`}
               </button>
               <div className="grid grid-cols-2 gap-3">
                 <button

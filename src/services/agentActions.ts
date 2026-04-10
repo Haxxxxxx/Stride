@@ -709,6 +709,7 @@ async function handleLogActivity(
     workoutName: activity,
     exercises: [],
     completedAt,
+    completedAtMs: now.getTime(),
     completionType: "full",
     isActivity: true,
     durationMinutes: duration,
@@ -821,7 +822,7 @@ export const AGENT_TOOL_NAMES = [
   "getActiveProgram", "swapExercise", "adjustVolume", "skipWorkoutDay",
   "regenerateDay", "regenerateWeek", "generateDeloadWeek", "getRecentPerformance",
   "getWorkoutHistory", "addExercise", "removeExercise", "generateBonusWorkout",
-  "loadDayWorkout", "logActivity",
+  "loadDayWorkout", "logActivity", "generateNewProgram",
 ] as const;
 
 async function handleGenerateNewProgram(

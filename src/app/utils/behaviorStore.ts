@@ -2,8 +2,9 @@
 // Tracks all user behavioral signals for the psychological architecture layers
 // localStorage is the primary cache; Firestore is the persistence layer
 
-import { getDocument, setDocument } from "../../services/firestore";
-import { notifyStreakMilestone, isStreakMilestone } from "../../services/notifications";
+import { getDocument, setDocument, queryCollection, where, orderBy } from "../../services/firestore";
+import { notifyStreakMilestone, isStreakMilestone, createNotification } from "../../services/notifications";
+import { getMondayOf, toLocalISO } from "../utils/dateUtils";
 
 export interface BehaviorState {
   // Session tracking
@@ -89,6 +90,9 @@ export interface BehaviorState {
   weeksSinceLastDeload: number;
   lastDeloadTimestamp: number;
   deloadRecommended: boolean;
+
+  // Missed-workout dedup guard
+  lastMissCheckTimestamp: number;
 }
 
 const DEFAULT_STATE: BehaviorState = {
@@ -138,6 +142,7 @@ const DEFAULT_STATE: BehaviorState = {
   weeksSinceLastDeload: 0,
   lastDeloadTimestamp: 0,
   deloadRecommended: false,
+  lastMissCheckTimestamp: 0,
 };
 
 const STORE_KEY = "stride_behavior_state";
@@ -150,30 +155,58 @@ export function setAuthUid(uid: string | null): void {
   _authUid = uid;
 }
 
-/** Get the Monday 00:00 UTC timestamp for the week containing `ts` */
+/** Get the Monday 00:00 local timestamp for the week containing `ts` */
 function getWeekNumber(ts: number): number {
-  const d = new Date(ts);
-  const dayOfWeek = d.getUTCDay(); // 0=Sun
-  const mondayOffset = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-  d.setUTCDate(d.getUTCDate() - mondayOffset);
-  d.setUTCHours(0, 0, 0, 0);
-  return d.getTime();
+  return getMondayOf(new Date(ts)).getTime();
+}
+
+/** Build a weekly recap summary string from pre-reset counters.
+ *  Returns null if the user had zero activity that week. */
+function generateWeeklyRecap(state: BehaviorState): string | null {
+  // Only generate if user had any activity this week
+  if (state.workoutsCompletedThisWeek === 0 && state.workoutsSkippedThisWeek === 0) return null;
+
+  const total = state.workoutsCompletedThisWeek + state.workoutsSkippedThisWeek;
+  const rate = total > 0 ? Math.round((state.workoutsCompletedThisWeek / total) * 100) : 0;
+  const streak = state.streakDays;
+
+  let recap = `Week Complete — ${state.workoutsCompletedThisWeek} session${state.workoutsCompletedThisWeek !== 1 ? "s" : ""} logged`;
+  if (state.workoutsSkippedThisWeek > 0) {
+    recap += `, ${state.workoutsSkippedThisWeek} missed`;
+  }
+  recap += `. Completion: ${rate}%.`;
+  if (streak > 0) recap += ` Streak: ${streak} days.`;
+  recap += ` Alignment: ${state.alignmentScore}/100.`;
+
+  return recap;
 }
 
 export function getBehaviorState(): BehaviorState {
-  let state: BehaviorState;
   try {
     const stored = localStorage.getItem(STORE_KEY);
-    state = stored ? { ...DEFAULT_STATE, ...JSON.parse(stored) } : { ...DEFAULT_STATE };
+    return stored ? { ...DEFAULT_STATE, ...JSON.parse(stored) } : { ...DEFAULT_STATE };
   } catch {
-    state = { ...DEFAULT_STATE };
+    return { ...DEFAULT_STATE };
   }
+}
 
-  // Auto-reset weekly counters when a new week starts (Monday boundary)
+/** Run scheduled resets (weekly + 14d/30d window roll). Call once per session from recordLogin(). */
+function runScheduledMaintenance(): void {
+  const state = getBehaviorState();
+  let dirty = false;
+
+  // Weekly reset (Monday boundary)
   const currentWeek = getWeekNumber(Date.now());
   const lastResetWeek = getWeekNumber(state.lastWeeklyReset || 0);
   if (currentWeek > lastResetWeek) {
-    // Increment deload counter if operator trained this week
+    const recap = generateWeeklyRecap(state);
+    if (recap && _authUid) {
+      createNotification(_authUid!, {
+        type: "system",
+        title: "Weekly Operations Report",
+        message: recap,
+      }).catch(() => {});
+    }
     if (state.workoutsCompletedThisWeek > 0) {
       state.weeksSinceLastDeload = (state.weeksSinceLastDeload || 0) + 1;
       state.deloadRecommended = state.weeksSinceLastDeload >= 3;
@@ -183,37 +216,33 @@ export function getBehaviorState(): BehaviorState {
     state.hesitationEvents7d = 0;
     state.delayLanguageCount7d = 0;
     state.lastWeeklyReset = Date.now();
-    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+    dirty = true;
   }
 
-  // Roll off 14d/30d counters when their window expires (also initialize on first use)
+  // 14d/30d window roll
   const now = Date.now();
   const MS_14D = 14 * 24 * 60 * 60 * 1000;
   const MS_30D = 30 * 24 * 60 * 60 * 1000;
-  let rolled = false;
   if (!state.windowStart14d) {
     state.windowStart14d = now;
-    rolled = true;
+    dirty = true;
   } else if (now - state.windowStart14d > MS_14D) {
-    state.workoutsCompleted14d = 0;
-    state.workoutsSkipped14d = 0;
     state.resetEvents14d = 0;
     state.windowStart14d = now;
-    rolled = true;
+    dirty = true;
   }
   if (!state.windowStart30d) {
     state.windowStart30d = now;
-    rolled = true;
+    dirty = true;
   } else if (now - state.windowStart30d > MS_30D) {
     state.resetEvents30d = 0;
     state.windowStart30d = now;
-    rolled = true;
-  }
-  if (rolled) {
-    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+    dirty = true;
   }
 
-  return state;
+  if (dirty) {
+    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  }
 }
 
 export function updateBehaviorState(updates: Partial<BehaviorState>): BehaviorState {
@@ -235,18 +264,96 @@ export function updateBehaviorState(updates: Partial<BehaviorState>): BehaviorSt
 // Firestore Sync
 // ============================================================
 
-/** Fetch behavior state from Firestore and merge into localStorage */
+/** Fetch behavior state from Firestore and merge into localStorage.
+ *  Uses "last-writer-wins" for timestamps and "take-max" for counters,
+ *  preserving offline progress that hasn't synced yet. */
 export async function syncFromFirestore(uid: string): Promise<BehaviorState> {
   const remote = await getDocument<Partial<BehaviorState>>(`users/${uid}/behaviorState/data`);
-  if (remote) {
-    const merged = { ...DEFAULT_STATE, ...remote };
-    localStorage.setItem(STORE_KEY, JSON.stringify(merged));
-    return merged;
+  if (!remote) {
+    // No remote data — push local state to Firestore as initial seed
+    const local = getBehaviorState();
+    await syncToFirestore(uid);
+    return local;
   }
-  // No remote data — push local state to Firestore as initial seed
+
   const local = getBehaviorState();
-  await syncToFirestore(uid);
-  return local;
+  const remoteState = { ...DEFAULT_STATE, ...remote };
+
+  // Counters: take the higher value (offline may have incremented beyond remote)
+  // NOTE: workoutsCompleted14d & workoutsSkipped14d are excluded here —
+  // they are computed from actual workout logs by refreshWorkoutCounts()
+  const maxKeys: (keyof BehaviorState)[] = [
+    "sessionCount", "totalWorkoutsCompleted", "streakDays",
+    "workoutsCompletedThisWeek", "workoutsSkippedThisWeek",
+    "hesitationEvents7d", "delayLanguageCount7d",
+    "resetEvents14d", "resetEvents30d",
+    "streakBreaks", "totalAgentInteractions",
+    "weeksSinceLastDeload",
+  ];
+
+  // Timestamps: take the most recent value
+  const tsKeys: (keyof BehaviorState)[] = [
+    "lastLoginTimestamp", "lastHesitationTimestamp",
+    "lastWorkoutCompletedAt", "lastWorkoutSkippedAt",
+    "lastFrictionTimestamp", "lastAlignmentCalculation",
+    "lastWeeklyReset", "lastDeloadTimestamp",
+    "lastStreakMilestone", "lastMissCheckTimestamp",
+  ];
+
+  const merged: BehaviorState = { ...DEFAULT_STATE };
+
+  // Start from remote, then overlay local wins
+  for (const key of Object.keys(DEFAULT_STATE) as (keyof BehaviorState)[]) {
+    if (maxKeys.includes(key)) {
+      (merged as Record<string, unknown>)[key] = Math.max(
+        (local[key] as number) ?? 0,
+        (remoteState[key] as number) ?? 0
+      );
+    } else if (tsKeys.includes(key)) {
+      (merged as Record<string, unknown>)[key] = Math.max(
+        (local[key] as number) ?? 0,
+        (remoteState[key] as number) ?? 0
+      );
+    } else if (key === "injuryFlag" || key === "burnoutFlag" || key === "deloadRecommended") {
+      // Safety flags: always prefer remote (server is authoritative)
+      (merged as Record<string, unknown>)[key] = remoteState[key];
+    } else {
+      // For strings, arrays, objects: prefer remote if non-default, else keep local
+      const remoteVal = remoteState[key];
+      const localVal = local[key];
+      (merged as Record<string, unknown>)[key] =
+        remoteVal !== undefined && remoteVal !== DEFAULT_STATE[key] ? remoteVal : localVal;
+    }
+  }
+
+  // Reflections: merge & deduplicate by timestamp, keep newest 50
+  const allReflections = [...(local.reflections ?? []), ...(remoteState.reflections ?? [])];
+  const seen = new Set<number>();
+  merged.reflections = allReflections
+    .filter((r) => { if (seen.has(r.timestamp)) return false; seen.add(r.timestamp); return true; })
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, 50);
+
+  // lastShownIndices: merge taking higher index per key
+  merged.lastShownIndices = { ...remoteState.lastShownIndices };
+  for (const [k, v] of Object.entries(local.lastShownIndices ?? {})) {
+    merged.lastShownIndices[k] = Math.max(v, merged.lastShownIndices[k] ?? 0);
+  }
+
+  localStorage.setItem(STORE_KEY, JSON.stringify(merged));
+
+  // Refresh 14d/30d workout counts from actual Firestore logs
+  // This corrects the monotonically-growing counters with real data
+  await refreshWorkoutCounts(uid).catch(() => {
+    // Silent fail — stale counters are better than a broken sync
+  });
+
+  // Re-read after refresh (counts may have been corrected)
+  const corrected = getBehaviorState();
+
+  // Push merged+corrected state back so both sides converge
+  await syncToFirestore(uid).catch(() => {});
+  return corrected;
 }
 
 /** Write current localStorage state to Firestore */
@@ -257,14 +364,81 @@ export async function syncToFirestore(uid: string): Promise<void> {
 }
 
 // ============================================================
+// Workout count refresh from actual Firestore logs
+// ============================================================
+
+/** Query workout logs to compute accurate 14d and 30d counts.
+ *  This corrects the monotonically-growing counters that are only
+ *  decremented when the entire window expires.
+ *  Only runs when Firestore is reachable — localStorage counters
+ *  remain as the offline approximation. */
+export async function refreshWorkoutCounts(uid: string): Promise<void> {
+  const now = new Date();
+  const fourteenDaysAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+
+  const cutoff = toLocalISO(fourteenDaysAgo);
+  const logs = await queryCollection<{ completedAt: string; completedAtMs?: number; completionType?: string; isActivity?: boolean }>(
+    `users/${uid}/workoutLogs`,
+    [where("completedAt", ">=", cutoff), orderBy("completedAt", "asc")]
+  );
+
+  let completed14d = 0;
+  let skipped14d = 0;
+
+  for (const log of logs) {
+    const logTime = new Date(log.completedAt).getTime();
+    if (isNaN(logTime)) continue;
+
+    // Skip activity logs (runs, walks) — they aren't workouts
+    if (log.isActivity) continue;
+
+    if (log.completionType === "skipped") {
+      skipped14d++;
+    } else if (log.completionType === "full" || log.completionType === "partial") {
+      completed14d++;
+    }
+  }
+
+  // Update localStorage with accurate counts (don't trigger Firestore sync
+  // here — the caller (syncFromFirestore) will push the merged state)
+  const state = getBehaviorState();
+  const updated: Partial<BehaviorState> = {};
+  let changed = false;
+
+  if (state.workoutsCompleted14d !== completed14d) {
+    updated.workoutsCompleted14d = completed14d;
+    changed = true;
+  }
+  if (state.workoutsSkipped14d !== skipped14d) {
+    updated.workoutsSkipped14d = skipped14d;
+    changed = true;
+  }
+
+  if (changed) {
+    // Write directly to localStorage to avoid recursive Firestore sync
+    const next = { ...state, ...updated };
+    localStorage.setItem(STORE_KEY, JSON.stringify(next));
+  }
+}
+
+// ============================================================
 // Mutation helpers (unchanged API, now with auto-sync)
 // ============================================================
 
 export function recordLogin(): BehaviorState {
+  // Run weekly resets + window rolls once per session (not inside getter)
+  runScheduledMaintenance();
+
   const state = getBehaviorState();
+  const now = Date.now();
+  // Dedup: don't increment if last login was within 60 seconds (StrictMode, re-mount, etc.)
+  if (now - state.lastLoginTimestamp < 60000) {
+    return state;
+  }
   return updateBehaviorState({
-    lastLoginTimestamp: Date.now(),
+    lastLoginTimestamp: now,
     sessionCount: state.sessionCount + 1,
+    frictionCountInSession: 0, // Reset per-session friction counter
   });
 }
 
@@ -290,23 +464,122 @@ export function recordHesitation(): BehaviorState {
 
 export function recordWorkoutCompleted(): BehaviorState {
   const state = getBehaviorState();
-  const newStreak = state.streakDays + 1;
+  const now = Date.now();
 
-  // Fire streak milestone notification
-  if (_authUid && isStreakMilestone(newStreak)) {
+  // Dedup: prevent console abuse — ignore if called within 30s of last call
+  if (now - state.lastWorkoutCompletedAt < 30000) {
+    return state;
+  }
+
+  // Only increment streak if this is the first workout of the day
+  const lastCompletedDate = state.lastWorkoutCompletedAt
+    ? new Date(state.lastWorkoutCompletedAt).toDateString()
+    : "";
+  const todayDate = new Date().toDateString();
+  const isNewDay = lastCompletedDate !== todayDate;
+  const newStreak = isNewDay ? state.streakDays + 1 : state.streakDays;
+
+  // Fire streak milestone notification only on new streak days
+  if (isNewDay && _authUid && isStreakMilestone(newStreak)) {
     notifyStreakMilestone(_authUid, newStreak).catch(console.warn);
   }
 
   return updateBehaviorState({
-    workoutsCompletedThisWeek: state.workoutsCompletedThisWeek + 1,
-    workoutsCompleted14d: state.workoutsCompleted14d + 1,
+    // Only increment weekly counter once per day (bonus workouts don't inflate consistency)
+    workoutsCompletedThisWeek: isNewDay ? state.workoutsCompletedThisWeek + 1 : state.workoutsCompletedThisWeek,
+    workoutsCompleted14d: isNewDay ? state.workoutsCompleted14d + 1 : state.workoutsCompleted14d,
     totalWorkoutsCompleted: state.totalWorkoutsCompleted + 1,
     lastWorkoutCompletedAt: Date.now(),
     streakDays: newStreak,
-    previousStreakDays: state.streakDays,
+    previousStreakDays: isNewDay ? state.streakDays : state.previousStreakDays,
     consecutiveMissedSessions: 0,
     windowStart14d: state.windowStart14d || Date.now(),
   });
+}
+
+export function recordWorkoutSkipped(): BehaviorState {
+  const state = getBehaviorState();
+  return updateBehaviorState({
+    workoutsSkippedThisWeek: state.workoutsSkippedThisWeek + 1,
+    workoutsSkipped14d: state.workoutsSkipped14d + 1,
+    consecutiveMissedSessions: state.consecutiveMissedSessions + 1,
+    lastWorkoutSkippedAt: Date.now(),
+    // Break streak on skip
+    previousStreakDays: state.streakDays,
+    streakDays: 0,
+    streakBreaks: state.streakDays > 0 ? state.streakBreaks + 1 : state.streakBreaks,
+    lastStreakMilestone: 0, // Reset so milestones re-trigger on streak rebuild
+  });
+}
+
+const MISS_CHECK_LOCK = "stride_miss_check_lock";
+
+/** Check if yesterday's workout was missed and auto-record if so */
+export function checkMissedWorkout(totalTrainingDays: number): void {
+  // Tab-level dedup: skip if another tab checked within the last 5 seconds
+  const lockTs = parseInt(localStorage.getItem(MISS_CHECK_LOCK) || "0");
+  if (Date.now() - lockTs < 5000) return;
+  localStorage.setItem(MISS_CHECK_LOCK, String(Date.now()));
+
+  const state = getBehaviorState();
+  const now = Date.now();
+  const lastCompleted = state.lastWorkoutCompletedAt || 0;
+  const lastSkipped = state.lastWorkoutSkippedAt || 0;
+  const lastRecorded = Math.max(lastCompleted, lastSkipped);
+
+  // Skip if we already checked and no new event has been recorded since
+  if (state.lastMissCheckTimestamp && lastRecorded <= state.lastMissCheckTimestamp) {
+    return;
+  }
+
+  // Check if a training day was missed since the last recorded event.
+  // Count how many TRAINING DAYS (not calendar days) have passed since lastRecorded.
+  // This prevents false misses over weekends/rest days.
+  const todayDow = new Date().getDay();
+  const todayIdx = todayDow === 0 ? 6 : todayDow - 1; // Mon=0..Sun=6
+  const isTrainingDay = todayIdx < totalTrainingDays;
+
+  // Count training days between lastRecorded and now
+  const lastDate = new Date(lastRecorded);
+  const today = new Date();
+  lastDate.setHours(0, 0, 0, 0);
+  today.setHours(0, 0, 0, 0);
+  const daysBetween = Math.floor((today.getTime() - lastDate.getTime()) / (24 * 60 * 60 * 1000));
+
+  // Count how many of those days were training days, split by current vs previous week
+  let missedTrainingDays = 0;
+  let missedThisWeek = 0;
+  const currentMonday = getMondayOf(new Date());
+  for (let d = 1; d < daysBetween; d++) {
+    const checkDate = new Date(lastDate);
+    checkDate.setDate(lastDate.getDate() + d);
+    const dow = checkDate.getDay();
+    const idx = dow === 0 ? 6 : dow - 1;
+    if (idx < totalTrainingDays) {
+      missedTrainingDays++;
+      // Only count toward this week's counter if the missed day is in the current week
+      if (checkDate >= currentMonday) missedThisWeek++;
+    }
+  }
+
+  if (missedTrainingDays > 0 && lastRecorded > 0) {
+    // Missed training days — only attribute current-week misses to weekly counter
+    updateBehaviorState({
+      workoutsSkippedThisWeek: state.workoutsSkippedThisWeek + missedThisWeek,
+      workoutsSkipped14d: state.workoutsSkipped14d + missedTrainingDays,
+      consecutiveMissedSessions: state.consecutiveMissedSessions + missedTrainingDays,
+      lastWorkoutSkippedAt: now,
+      lastMissCheckTimestamp: now,
+      // Break streak on miss (mirrors recordWorkoutSkipped)
+      streakDays: 0,
+      previousStreakDays: state.streakDays > 0 ? state.streakDays : state.previousStreakDays,
+      streakBreaks: state.streakDays > 0 ? state.streakBreaks + 1 : state.streakBreaks,
+      lastStreakMilestone: state.streakDays > 0 ? 0 : state.lastStreakMilestone, // Reset so milestones re-trigger on rebuild
+    });
+  } else {
+    // No miss detected, but record that we checked so we don't re-evaluate
+    updateBehaviorState({ lastMissCheckTimestamp: now });
+  }
 }
 
 export function recordDelayLanguage(): BehaviorState {
@@ -366,6 +639,8 @@ export function recordDeloadComplete(): BehaviorState {
 // Calculate weekly alignment score (0-100)
 export function calculateAlignmentScore(): number {
   const state = getBehaviorState();
+  // Don't inflate score for users with no workout history — return current score unchanged
+  if (state.totalWorkoutsCompleted === 0) return state.alignmentScore;
   let score = 100;
 
   // Subtract for negative behaviors
@@ -378,8 +653,8 @@ export function calculateAlignmentScore(): number {
   const completionBonus = Math.min(state.workoutsCompletedThisWeek * 6, 24);
   score += completionBonus;
 
-  // Re-entry bonus
-  if (state.consecutiveMissedSessions >= 2 && state.lastWorkoutCompletedAt > state.lastWorkoutSkippedAt) {
+  // Re-entry bonus: user broke a streak but is back training (first 3 days of rebuild)
+  if (state.streakBreaks > 0 && state.streakDays > 0 && state.streakDays <= 3) {
     score += 10;
   }
 

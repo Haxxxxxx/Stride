@@ -1,5 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import { Link } from "react-router";
+import { Link, useLocation, useNavigate } from "react-router";
 import svgPaths from "../../imports/svg-2gts8wf65t";
 import { CircularProgress } from "./CircularProgress";
 import { WorkoutSequenceModal, loadAnyWIP, type WorkoutWIP } from "./WorkoutSequenceModal";
@@ -807,6 +807,8 @@ function CoreCircuit({ activeProgram, currentWeek, todayWorkout, isRestDay, onQu
 
 export default function Dashboard() {
   const { user } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loginMessage, setLoginMessage] = useState("");
   const [streakMessage, setStreakMessage] = useState<string | null>(null);
@@ -1027,6 +1029,7 @@ export default function Dashboard() {
 
   const handleModalClose = () => {
     setIsModalOpen(false);
+    window.dispatchEvent(new CustomEvent("stride:workoutModalClose"));
     setShowQuickMenu(false);
     // Keep quickWorkoutDay if WIP was saved (user can resume), clear otherwise
     const anyWip = loadAnyWIP();
@@ -1037,6 +1040,42 @@ export default function Dashboard() {
     // Force re-read of behavior state after workout completion
     setRefreshKey(k => k + 1);
   };
+
+  // Open modal and notify floating timer
+  const openModal = () => {
+    setIsModalOpen(true);
+    window.dispatchEvent(new CustomEvent("stride:workoutModalOpen"));
+  };
+
+  // Listen for resume events from the floating mini-timer (same page)
+  useEffect(() => {
+    const handleResumeEvent = () => {
+      const anyWip = loadAnyWIP();
+      if (!anyWip) return;
+      // Set up the workout day from WIP snapshot so the modal can restore
+      if (anyWip.snapshotExercises && anyWip.snapshotExercises.length > 0) {
+        setQuickWorkoutDay({ dayNumber: 0, name: anyWip.workoutName, exercises: anyWip.snapshotExercises });
+      }
+      openModal();
+    };
+    window.addEventListener("stride:resumeWorkout", handleResumeEvent);
+    return () => window.removeEventListener("stride:resumeWorkout", handleResumeEvent);
+  }, []);
+
+  // Handle navigation from floating timer on other pages (location.state.resumeWorkout)
+  useEffect(() => {
+    if (location.state?.resumeWorkout) {
+      // Clear React Router's in-memory state to prevent re-triggering on re-render
+      navigate("/app", { replace: true, state: {} });
+      const anyWip = loadAnyWIP();
+      if (anyWip) {
+        if (anyWip.snapshotExercises && anyWip.snapshotExercises.length > 0) {
+          setQuickWorkoutDay({ dayNumber: 0, name: anyWip.workoutName, exercises: anyWip.snapshotExercises });
+        }
+        openModal();
+      }
+    }
+  }, [location.state, navigate]);
 
   /** Resume a partial workout — open modal with only the remaining exercises */
   const handleResume = () => {
@@ -1059,7 +1098,7 @@ export default function Dashboard() {
       name: `${todayWorkout.name} (Resumed)`,
       exercises: remaining,
     });
-    setIsModalOpen(true);
+    openModal();
   };
 
   /** Resume a bonus workout WIP (rest day or orphaned session) */
@@ -1079,7 +1118,7 @@ export default function Dashboard() {
       name: bonusWip.workoutName,
       exercises: wipExercises.length > 0 ? wipExercises : [],
     });
-    setIsModalOpen(true);
+    openModal();
   };
 
   const [generatingQuick, setGeneratingQuick] = useState(false);
@@ -1096,7 +1135,7 @@ export default function Dashboard() {
         const exercises = await generateDay(focus, day.exercises.length, personalization ?? undefined);
         if (exercises.length > 0) {
           setQuickWorkoutDay({ ...day, exercises });
-          setIsModalOpen(true);
+          openModal();
           setGeneratingQuick(false);
           return;
         }
@@ -1107,7 +1146,7 @@ export default function Dashboard() {
     }
     // Fallback: use the hardcoded template
     setQuickWorkoutDay(day);
-    setIsModalOpen(true);
+    openModal();
   };
 
   // Reorder exercises in today's workout and persist to Firestore
@@ -1224,7 +1263,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      <ActiveOperation onOpenModal={() => setIsModalOpen(true)} onResume={handleResume} onResumeBonusWip={handleResumeBonusWip} onQuickWorkout={handleQuickWorkout} todayWorkout={quickWorkoutDay || todayWorkout} todayCompleted={todayCompleted && !quickWorkoutDay} todayLog={todayLog} isRestDay={(isRestDay || isSkippedDay) && !quickWorkoutDay} wip={quickWorkoutDay ? bonusWip : wip} bonusWip={bonusWip} generatingQuick={generatingQuick} showQuickMenu={showQuickMenu} setShowQuickMenu={setShowQuickMenu} />
+      <ActiveOperation onOpenModal={() => openModal()} onResume={handleResume} onResumeBonusWip={handleResumeBonusWip} onQuickWorkout={handleQuickWorkout} todayWorkout={quickWorkoutDay || todayWorkout} todayCompleted={todayCompleted && !quickWorkoutDay} todayLog={todayLog} isRestDay={(isRestDay || isSkippedDay) && !quickWorkoutDay} wip={quickWorkoutDay ? bonusWip : wip} bonusWip={bonusWip} generatingQuick={generatingQuick} showQuickMenu={showQuickMenu} setShowQuickMenu={setShowQuickMenu} />
       <OperationsList todayWorkout={quickWorkoutDay || todayWorkout} todayCompleted={todayCompleted && !quickWorkoutDay} completedExerciseNames={completedExerciseNames} wip={quickWorkoutDay ? bonusWip : wip} onReorder={quickWorkoutDay ? undefined : handleReorderExercises} />
 
       {/* Core Circuit Add-on */}

@@ -1,7 +1,11 @@
-import { Outlet, useLocation, Link } from "react-router";
+import { useState, useEffect } from "react";
+import { Outlet, useLocation, useNavigate, Link } from "react-router";
 import svgPaths from "../../imports/svg-2gts8wf65t";
-import { useState } from "react";
 import ErrorBoundary from "./ErrorBoundary";
+import { useAuth } from "../contexts/AuthContext";
+import { updateDocument } from "../../services/firestore";
+import { Scanline } from "./Scanline";
+import { loadAnyWIP, type WorkoutWIP } from "./WorkoutSequenceModal";
 
 function Battery() {
   return (
@@ -18,6 +22,17 @@ function Battery() {
 }
 
 function StatusBar() {
+  const [time, setTime] = useState(() =>
+    new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: true })
+  );
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setTime(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: true }));
+    }, 10_000);
+    return () => clearInterval(id);
+  }, []);
+
   return (
     <div className="bg-black h-[44px] pointer-events-auto w-full border-b border-white/10 relative">
       <Battery />
@@ -31,8 +46,8 @@ function StatusBar() {
           <path d={svgPaths.p26d17600} fill="white" />
         </svg>
       </div>
-      <div className="absolute inset-[15.91%_80%_36.36%_5.6%]">
-        <p className="absolute font-['JetBrains_Mono',monospace] font-medium leading-[normal] left-0 not-italic right-0 text-[13px] text-center text-white top-[calc(50%-3.5px)] tracking-[0.5px]">09:41</p>
+      <div className="absolute inset-[15.91%_70%_36.36%_5.6%]">
+        <p className="absolute font-['JetBrains_Mono',monospace] font-medium leading-[normal] left-0 not-italic right-0 text-[11px] text-center text-white top-[calc(50%-3.5px)] tracking-[0.5px] whitespace-nowrap">{time}</p>
       </div>
     </div>
   );
@@ -83,8 +98,9 @@ function Navbar() {
   return (
     <div className="w-full flex justify-center p-4">
       <div className="bg-black border border-white/20 flex h-[48px] items-center justify-between p-[2px] w-full max-w-[343px]">
-        <Link 
-          to="/app" 
+        <Link
+          to="/app"
+          aria-label="Dashboard"
           className={`flex flex-1 h-full items-center justify-center transition-colors ${
             isActive("/app") ? "bg-[#ff6600] text-black" : "text-white/50 hover:text-white"
           }`}
@@ -93,9 +109,10 @@ function Navbar() {
             <HouseSimple />
           </div>
         </Link>
-        
-        <Link 
-          to="/app/progress" 
+
+        <Link
+          to="/app/progress"
+          aria-label="Progress"
           className={`flex flex-1 h-full items-center justify-center transition-colors ${
             isActive("/app/progress") ? "bg-[#ff6600] text-black" : "text-white/50 hover:text-white"
           }`}
@@ -104,9 +121,10 @@ function Navbar() {
             <Target />
           </div>
         </Link>
-        
-        <Link 
-          to="/app/challenges" 
+
+        <Link
+          to="/app/challenges"
+          aria-label="Challenges"
           className={`flex flex-1 h-full items-center justify-center transition-colors ${
             isActive("/app/challenges") ? "bg-[#ff6600] text-black" : "text-white/50 hover:text-white"
           }`}
@@ -115,9 +133,10 @@ function Navbar() {
             <Trophy />
           </div>
         </Link>
-        
-        <Link 
-          to="/app/profile" 
+
+        <Link
+          to="/app/profile"
+          aria-label="Profile"
           className={`flex flex-1 h-full items-center justify-center transition-colors ${
             isActive("/app/profile") ? "bg-[#ff6600] text-black" : "text-white/50 hover:text-white"
           }`}
@@ -128,6 +147,93 @@ function Navbar() {
         </Link>
       </div>
     </div>
+  );
+}
+
+/** Floating mini-timer — like YouTube's mini player. Shows on all pages when a workout is in progress. */
+function FloatingWorkoutTimer() {
+  const [wip, setWip] = useState<WorkoutWIP | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  useEffect(() => {
+    const tick = () => {
+      const w = loadAnyWIP();
+      // Only update wip state when key fields change (avoids re-render every second from new JSON.parse reference)
+      setWip(prev => {
+        if (!w && !prev) return prev;
+        if (!w || !prev) return w;
+        if (prev.workoutName === w.workoutName && prev.currentSet === w.currentSet && prev.currentExerciseIdx === w.currentExerciseIdx && prev.savedAt === w.savedAt) return prev;
+        return w;
+      });
+      if (w) {
+        // Timer keeps "running" by computing elapsed from saved snapshot
+        setElapsed(w.timer + Math.floor((Date.now() - w.savedAt) / 1000));
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Listen for the workout modal opening — hide floating timer while modal is active
+  const [modalOpen, setModalOpen] = useState(false);
+  useEffect(() => {
+    const onOpen = () => setModalOpen(true);
+    const onClose = () => { setModalOpen(false); setWip(loadAnyWIP()); };
+    window.addEventListener("stride:workoutModalOpen", onOpen);
+    window.addEventListener("stride:workoutModalClose", onClose);
+    return () => {
+      window.removeEventListener("stride:workoutModalOpen", onOpen);
+      window.removeEventListener("stride:workoutModalClose", onClose);
+    };
+  }, []);
+
+  if (!wip || modalOpen) return null;
+
+  const mm = Math.floor(elapsed / 60).toString().padStart(2, "0");
+  const ss = (elapsed % 60).toString().padStart(2, "0");
+  const name = wip.workoutName.length > 18 ? wip.workoutName.slice(0, 16) + "…" : wip.workoutName;
+
+  const handleTap = () => {
+    if (location.pathname === "/app") {
+      // Already on dashboard — dispatch event so Dashboard auto-opens the modal
+      window.dispatchEvent(new CustomEvent("stride:resumeWorkout"));
+    } else {
+      // Navigate to dashboard with resume flag
+      navigate("/app", { state: { resumeWorkout: true } });
+    }
+  };
+
+  return (
+    <button
+      onClick={handleTap}
+      className="absolute bottom-[72px] left-2 right-2 z-40 bg-black/95 border border-[#ff6600] backdrop-blur-sm flex items-center gap-3 px-3 py-2.5 group hover:bg-[#ff6600]/10 transition-colors"
+    >
+      {/* Pulsing indicator */}
+      <div className="size-2 bg-[#ff6600] animate-pulse shrink-0" />
+
+      {/* Workout name */}
+      <div className="flex-1 min-w-0 text-left">
+        <div className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] uppercase tracking-[1.5px] truncate">
+          {name}
+        </div>
+        <div className="font-['JetBrains_Mono',monospace] text-[7px] text-white/40 uppercase tracking-wider">
+          Set {wip.currentSet} · Ex {wip.currentExerciseIdx + 1}
+        </div>
+      </div>
+
+      {/* Timer */}
+      <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold tabular-nums shrink-0">
+        {mm}:{ss}
+      </div>
+
+      {/* Resume label */}
+      <div className="font-['JetBrains_Mono',monospace] text-[7px] text-white/30 uppercase tracking-wider shrink-0 group-hover:text-[#ff6600] transition-colors">
+        TAP TO<br />RESUME
+      </div>
+    </button>
   );
 }
 
@@ -154,16 +260,25 @@ function AIAgentButton() {
 export default function Root() {
   const location = useLocation();
   const isAIPage = location.pathname === '/app/ai-agent';
+  const { user } = useAuth();
+
+  // Heartbeat: update lastSeen every 2 minutes for online presence
+  useEffect(() => {
+    if (!user) return;
+    const ping = () => updateDocument(`users/${user.uid}`, { lastSeen: new Date().toISOString() }).catch(() => {});
+    ping(); // immediate on mount
+    const id = setInterval(ping, 5 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [user]);
 
   return (
     <div className="bg-black w-full min-h-screen flex items-center justify-center p-4">
       {/* iPhone Frame Container */}
-      <div className="bg-black w-full max-w-[375px] h-[812px] flex flex-col border-2 border-white/10 relative overflow-hidden">
+      <div className="bg-black w-full max-w-[375px] h-[812px] max-h-[100dvh] flex flex-col border-2 border-white/10 relative overflow-hidden">
         {/* Subtle scanline effect */}
-        <div className="absolute inset-0 pointer-events-none z-50 opacity-[0.015]" style={{
-          backgroundImage: `repeating-linear-gradient(0deg, transparent, transparent 1px, white 2px, white 2px)`,
-          backgroundSize: '100% 4px'
-        }} />
+        <div className="absolute inset-0 z-50 pointer-events-none">
+          <Scanline opacity="0.015" />
+        </div>
         
         {/* Noise texture */}
         <div className="absolute inset-0 pointer-events-none z-40 opacity-[0.02]" style={{
@@ -184,6 +299,8 @@ export default function Root() {
         
         {!isAIPage && (
           <>
+            <FloatingWorkoutTimer />
+
             <div className="absolute bottom-0 left-0 right-0 z-30">
               <Navbar />
             </div>

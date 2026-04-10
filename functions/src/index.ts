@@ -467,3 +467,46 @@ export const backfillParticipantProfiles = onCall(async (request) => {
 
   return { success: true, updated };
 });
+
+/**
+ * One-time backfill: add completedAtMs (epoch) to all workoutLogs that lack it.
+ * After running, queries can switch from completedAt string to completedAtMs number.
+ */
+export const backfillCompletedAtMs = onCall(async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  if (!ADMIN_EMAILS.includes(request.auth.token?.email || "")) {
+    throw new HttpsError("permission-denied", "Admin access required.");
+  }
+  const firestore = admin.firestore();
+  const usersSnap = await firestore.collection("users").get();
+  let updated = 0;
+
+  for (const userDoc of usersSnap.docs) {
+    const logsSnap = await firestore.collection(`users/${userDoc.id}/workoutLogs`).get();
+    let batch = firestore.batch();
+    let batchCount = 0;
+
+    for (const logDoc of logsSnap.docs) {
+      const data = logDoc.data();
+      if (data.completedAtMs) continue;
+      const completedAt = data.completedAt as string | undefined;
+      if (!completedAt) continue;
+      const ms = new Date(completedAt).getTime();
+      if (isNaN(ms)) continue;
+      batch.update(logDoc.ref, { completedAtMs: ms });
+      batchCount++;
+      if (batchCount >= 499) {
+        await batch.commit();
+        updated += batchCount;
+        batch = firestore.batch();
+        batchCount = 0;
+      }
+    }
+    if (batchCount > 0) {
+      await batch.commit();
+      updated += batchCount;
+    }
+  }
+
+  return { success: true, updated };
+});

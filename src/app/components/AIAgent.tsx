@@ -947,6 +947,7 @@ export default function AIAgent() {
             exercises: [],
             duration: 0,
             completedAt: toLocalISO(new Date()),
+            completedAtMs: Date.now(),
             completionType: "skipped",
           }).catch(console.warn);
         }
