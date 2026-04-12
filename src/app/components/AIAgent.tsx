@@ -730,6 +730,8 @@ export default function AIAgent() {
         setMessages(prev => [...prev, msg]);
       } else if ((normalizedName === "generateBonusWorkout" || normalizedName === "loadDayWorkout") && actionResult.data.bonusWorkout) {
         const bonus = actionResult.data.bonusWorkout as Message["bonusWorkout"];
+        // Immediately store so the Dashboard picks it up regardless of how the user navigates back
+        try { localStorage.setItem("stride_bonus_workout", JSON.stringify(bonus)); } catch { /* quota */ }
         const msg: Message = {
           type: "ai",
           text,

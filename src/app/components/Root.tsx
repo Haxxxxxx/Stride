@@ -169,7 +169,10 @@ function FloatingWorkoutTimer() {
       });
       if (w) {
         // Timer keeps "running" by computing elapsed from saved snapshot
-        setElapsed(w.timer + Math.floor((Date.now() - w.savedAt) / 1000));
+        // but NOT when paused/readiness — the timer was frozen at wip.timer
+        setElapsed(w.status === "paused" || w.status === "readiness"
+          ? w.timer
+          : w.timer + Math.floor((Date.now() - w.savedAt) / 1000));
       }
     };
     tick();

@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import svgPaths from "../../imports/svg-2gts8wf65t";
 import { CircularProgress } from "./CircularProgress";
@@ -522,6 +522,16 @@ function ActiveOperation({ onOpenModal, onResume, onResumeBonusWip, onQuickWorko
       >
         {wip ? "Resume Calibration" : "Begin Calibration"}
       </button>
+
+      {/* Orphaned WIP from a different workout (e.g. agent renamed today's workout via regenerateDay) */}
+      {!wip && bonusWip && (
+        <button
+          onClick={onResumeBonusWip}
+          className="w-full border border-[#ff6600] text-[#ff6600] font-['JetBrains_Mono',monospace] text-[10px] font-bold uppercase tracking-wider py-2.5 mt-2 hover:bg-[#ff6600]/10 transition-colors"
+        >
+          Resume {bonusWip.workoutName.length > 24 ? bonusWip.workoutName.slice(0, 22) + "…" : bonusWip.workoutName}
+        </button>
+      )}
     </div>
   );
 }
@@ -822,7 +832,6 @@ export default function Dashboard() {
   const [programLoaded, setProgramLoaded] = useState(false);
   const [showQuickMenu, setShowQuickMenu] = useState(false);
   const [quickWorkoutDay, setQuickWorkoutDay] = useState<WorkoutDay | null>(null);
-  const [dismissedExpiry, setDismissedExpiry] = useState(false);
 
   // Check for bonus workout from AI agent (stored in localStorage by AIAgent)
   // Shows it on the dashboard (protocol queue + active operation) so the user can review before starting
@@ -1002,15 +1011,14 @@ export default function Dashboard() {
     ? isProgramExpired(activeProgram.createdAt, activeProgram.weeks.length)
     : false;
 
-  // Restore persisted expiry dismissal — tied to program ID so it resets for new programs
-  // useLayoutEffect prevents a one-frame flash of the banner before dismissal is restored
-  useLayoutEffect(() => {
-    if (!activeProgram?.id) return;
+  // Derive expiry dismissal directly from localStorage — no timing issues on re-mount.
+  // refreshKey forces re-read after workout completion or explicit dismissal.
+  const dismissedExpiry = useMemo(() => {
+    if (!activeProgram?.id) return false;
     try {
-      const stored = localStorage.getItem("stride_dismissed_expiry");
-      setDismissedExpiry(stored === activeProgram.id);
-    } catch { /* ignore */ }
-  }, [activeProgram?.id]);
+      return localStorage.getItem("stride_dismissed_expiry") === activeProgram.id;
+    } catch { return false; }
+  }, [activeProgram?.id, refreshKey]);
 
   // Check for in-progress workout (WIP saved when modal was closed mid-workout)
   const [wip, setWip] = useState<WorkoutWIP | null>(null);
@@ -1253,7 +1261,7 @@ export default function Dashboard() {
                 Generate New Protocol →
               </Link>
               <button
-                onClick={() => { setDismissedExpiry(true); try { localStorage.setItem("stride_dismissed_expiry", activeProgram?.id ?? ""); } catch {} }}
+                onClick={() => { try { localStorage.setItem("stride_dismissed_expiry", activeProgram?.id ?? ""); } catch {} setRefreshKey(k => k + 1); }}
                 className="flex-1 border border-white/30 text-white/60 font-['JetBrains_Mono',monospace] text-[10px] font-bold uppercase tracking-wider py-3 hover:border-white/50 hover:text-white/80 transition-colors"
               >
                 Continue Current →

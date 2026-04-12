@@ -47,6 +47,7 @@ export interface WorkoutWIP {
   readiness: ReadinessData;
   exerciseOrder: number[];
   skippedExercises: number[];
+  removedExercises: number[];
   savedAt: number; // Date.now() — to detect stale sessions
   exerciseHash?: string; // fingerprint of exercise names — invalidates order if program changed
   snapshotExercises?: Exercise[]; // full exercise list for resume
@@ -309,6 +310,13 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
         pipVideoRef.current = v;
         v.addEventListener("leavepictureinpicture", () => {
           if (pipIntervalRef.current) { clearInterval(pipIntervalRef.current); pipIntervalRef.current = null; }
+          // Stop the canvas capture stream so the browser releases the capture resource
+          if (v.srcObject) {
+            (v.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+            v.srcObject = null;
+          }
+          pipVideoRef.current = null;
+          pipCanvasRef.current = null;
           setIsPiP(false);
         });
       }
@@ -346,9 +354,9 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
   useEffect(() => { timerRef.current = timer; }, [timer]);
 
   // Refs for latest WIP state — used by unmount/beforeunload to save without stale closures
-  const wipStateRef = useRef({ status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, exercises });
+  const wipStateRef = useRef({ status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, removedExercises, exercises });
   useEffect(() => {
-    wipStateRef.current = { status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, exercises };
+    wipStateRef.current = { status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, removedExercises, exercises };
   });
 
   // ============================================================
@@ -432,6 +440,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
           readiness: s.readiness,
           exerciseOrder: s.resolvedOrder,
           skippedExercises: s.skippedExercises,
+          removedExercises: s.removedExercises,
           exerciseHash: exerciseFingerprint(s.exercises),
           snapshotExercises: s.exercises,
         });
@@ -472,12 +481,13 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
         readiness,
         exerciseOrder: resolvedOrder,
         skippedExercises,
+        removedExercises,
         exerciseHash: exerciseFingerprint(exercises),
         snapshotExercises: exercises,
       });
     }
     onClose();
-  }, [status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, exercises, onClose]);
+  }, [status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, removedExercises, exercises, onClose]);
 
   // Escape key — save WIP and close
   useEffect(() => {
@@ -531,9 +541,10 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
                 readiness: wip.readiness,
                 totalVolume,
                 avgRPE: totalSetsCount > 0 ? Math.round(totalRPE / totalSetsCount * 10) / 10 : 0,
-              }).catch(console.warn);
-              recordWorkoutCompleted();
-              syncChallengeProgress(user.uid, getBehaviorState()).catch(console.warn);
+              }).then(() => refreshWorkoutCounts(user.uid).catch(console.warn))
+                .catch(console.warn);
+              const updatedState = recordWorkoutCompleted();
+              syncChallengeProgress(user.uid, updatedState).catch(console.warn);
               notifyWorkoutComplete(user.uid, workoutName, wip.timer).catch(console.warn);
             }
             onClose();
@@ -569,7 +580,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
           setReadiness(wip.readiness);
           setExerciseOrder(wip.exerciseOrder?.length ? wip.exerciseOrder : currentExercises.map((_, i) => i));
           setSkippedExercises(wip.skippedExercises ?? []);
-          setRemovedExercises([]);
+          setRemovedExercises(wip.removedExercises ?? []);
           hasStartedRef.current = true;
           setStartMessage("");
           setHesitationMessage("");
@@ -858,14 +869,15 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     newOrder.splice(nextIdx, 1);
     newOrder.push(skippedOriginalIdx);
     setExerciseOrder(newOrder);
-    if (!skippedExercises.includes(skippedOriginalIdx)) {
-      setSkippedExercises([...skippedExercises, skippedOriginalIdx]);
-    }
+    const updatedSkipped = skippedExercises.includes(skippedOriginalIdx)
+      ? skippedExercises
+      : [...skippedExercises, skippedOriginalIdx];
+    setSkippedExercises(updatedSkipped);
 
     // Do NOT auto-complete — the deferred exercise will come back around.
     if (nextIdx >= newOrder.length) {
       // No more exercises remain in order
-      handleComplete(exerciseLogs, skippedExercises, newOrder);
+      handleComplete(exerciseLogs, updatedSkipped, newOrder);
       return;
     }
 
@@ -913,7 +925,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
       const updatedState = recordWorkoutCompleted();
       if (user) {
         syncChallengeProgress(user.uid, updatedState).catch(console.warn);
-        notifyWorkoutComplete(user.uid, workoutName, timer).catch(console.warn);
+        notifyWorkoutComplete(user.uid, workoutName, timerRef.current).catch(console.warn);
       }
     } else {
       // Partial: mark training happened today + count toward 14d consistency
