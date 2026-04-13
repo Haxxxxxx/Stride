@@ -835,24 +835,14 @@ export default function Dashboard() {
 
   // Check for bonus workout from AI agent (stored in localStorage by AIAgent)
   // Shows it on the dashboard (protocol queue + active operation) so the user can review before starting
-  // Persists to sessionStorage so navigating away doesn't lose the workout
+  // Kept in localStorage until the workout is started — survives app restart
   useEffect(() => {
     const stored = localStorage.getItem("stride_bonus_workout");
     if (stored) {
       try {
-        const bonus = JSON.parse(stored) as WorkoutDay;
-        setQuickWorkoutDay(bonus);
-        sessionStorage.setItem("stride_bonus_workout_pending", stored);
+        setQuickWorkoutDay(JSON.parse(stored) as WorkoutDay);
       } catch { /* ignore */ }
-      localStorage.removeItem("stride_bonus_workout");
-    } else {
-      // Re-mount after navigation — restore from sessionStorage
-      const pending = sessionStorage.getItem("stride_bonus_workout_pending");
-      if (pending) {
-        try {
-          setQuickWorkoutDay(JSON.parse(pending) as WorkoutDay);
-        } catch { /* ignore */ }
-      }
+      // Don't remove — kept until workout modal opens (see openModal)
     }
   }, []);
 
@@ -1043,7 +1033,6 @@ export default function Dashboard() {
     const anyWip = loadAnyWIP();
     if (!anyWip || anyWip.workoutName !== quickWorkoutDay?.name) {
       setQuickWorkoutDay(null);
-      sessionStorage.removeItem("stride_bonus_workout_pending");
     }
     // Force re-read of behavior state after workout completion
     setRefreshKey(k => k + 1);
@@ -1052,6 +1041,8 @@ export default function Dashboard() {
   // Open modal and notify floating timer
   const openModal = () => {
     setIsModalOpen(true);
+    // Workout is now starting — clear the durable bonus workout from localStorage
+    try { localStorage.removeItem("stride_bonus_workout"); } catch { /* ignore */ }
     window.dispatchEvent(new CustomEvent("stride:workoutModalOpen"));
   };
 
@@ -1155,6 +1146,15 @@ export default function Dashboard() {
     // Fallback: use the hardcoded template
     setQuickWorkoutDay(day);
     openModal();
+  };
+
+  // Reorder exercises in a bonus/quick workout (local state only, no Firestore)
+  const handleReorderBonusExercises = (reordered: Exercise[]) => {
+    if (!quickWorkoutDay) return;
+    const updated = { ...quickWorkoutDay, exercises: reordered };
+    setQuickWorkoutDay(updated);
+    // Update localStorage so it persists across navigations
+    try { localStorage.setItem("stride_bonus_workout", JSON.stringify(updated)); } catch { /* ignore */ }
   };
 
   // Reorder exercises in today's workout and persist to Firestore
@@ -1272,7 +1272,7 @@ export default function Dashboard() {
       )}
 
       <ActiveOperation onOpenModal={() => openModal()} onResume={handleResume} onResumeBonusWip={handleResumeBonusWip} onQuickWorkout={handleQuickWorkout} todayWorkout={quickWorkoutDay || todayWorkout} todayCompleted={todayCompleted && !quickWorkoutDay} todayLog={todayLog} isRestDay={(isRestDay || isSkippedDay) && !quickWorkoutDay} wip={quickWorkoutDay ? bonusWip : wip} bonusWip={bonusWip} generatingQuick={generatingQuick} showQuickMenu={showQuickMenu} setShowQuickMenu={setShowQuickMenu} />
-      <OperationsList todayWorkout={quickWorkoutDay || todayWorkout} todayCompleted={todayCompleted && !quickWorkoutDay} completedExerciseNames={completedExerciseNames} wip={quickWorkoutDay ? bonusWip : wip} onReorder={quickWorkoutDay ? undefined : handleReorderExercises} />
+      <OperationsList todayWorkout={quickWorkoutDay || todayWorkout} todayCompleted={todayCompleted && !quickWorkoutDay} completedExerciseNames={completedExerciseNames} wip={quickWorkoutDay ? bonusWip : wip} onReorder={quickWorkoutDay ? handleReorderBonusExercises : handleReorderExercises} />
 
       {/* Core Circuit Add-on */}
       <CoreCircuit activeProgram={activeProgram} currentWeek={currentWeek} todayWorkout={todayWorkout} isRestDay={isRestDay || isSkippedDay} onQuickWorkout={handleQuickWorkout} />

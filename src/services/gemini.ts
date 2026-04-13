@@ -237,15 +237,15 @@ const TOOL_PATTERNS = [
   /\b(adjust|increase|decrease|lower|raise|more|fewer)\s+(sets|reps|volume|rest|weight)\b/i, // adjust volume
   /\b(skip|cancel)\s+(today|tomorrow|this\s+day|my\s+workout)\b/i,                 // skip today
   /\b(deload|lighter\s+week|recovery\s+week|easier\s+week)\b/i,                    // deload
-  /\b(generate|create|give\s+me|build|make)\s+(?:\w+\s+){0,6}(workout|session|routine|program|protocol)\b/i, // generate a workout/program
+  /\b(generate|create|give\s+me|build|make)\s+(?:\w+\s+){0,6}(workout|session|routine|program|protocol|day)\b/i, // generate a workout/day/program
   /\b(program|protocol)\s+(has\s+)?(expired|completed|ended|finished)\b/i,            // program expired
   /\b\d+\s*[-–]?\s*(module|exercise|move)\s+\w+\s+workout\b/i,                     // 8 module back workout
   /\b(how('s| is))\s+my\s+\w+\s+(progress|trending|doing)\b/i,                     // how's my bench progressing
   /\bshow\s+(my\s+)?(progress|performance|history|stats)\b/i,                       // show my progress
   /\b(what('s| is))\s+my\s+(program|protocol|schedule)\b/i,                         // what's my program
   /\bbonus\b.*\b(workout|session|calibration)\b/i,                                  // bonus cardio and ab workout/session
-  /\b(let'?s|let\s+us)\s+(do|start|try|get)\b.*\b(workout|session|calibration)\b/i, // let's do a cardio session
-  /\b(cardio|core|abs?|arms?|legs?|back|chest|shoulders?|upper|lower|full\s*body|hiit|stretching)\s+(workout|session|circuit)\b/i, // cardio session, core circuit
+  /\b(let'?s|let\s+us)\s+(do|start|try|get|create|make|build)\b.*\b(workout|session|calibration|day)\b/i, // let's do/create a cardio session/day
+  /\b(cardio|core|abs?|arms?|legs?|back|chest|shoulders?|upper|lower|full\s*body|hiit|stretching|pull|push)\s+(workout|session|circuit|day)\b/i, // cardio session, arm day, push day
   /\b(do|switch|load|start|use)\s+(?:day\s+\d|session\s+\w)/i,                       // do day 2 / switch to session B
   /\bday\s+\d.*\b(instead|today|now)\b/i,                                            // day 2 instead / day 3 today
   /\b(instead|swap)\s+.*\bday\s+\d/i,                                               // instead do day 2
