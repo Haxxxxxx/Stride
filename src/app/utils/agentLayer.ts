@@ -198,26 +198,28 @@ export function detectMode(userInput: string): AgentMode {
     }
   }
 
+  // Check for clarification FIRST (confusion, hesitation, resistance)
+  // These override action keywords — "I can't do this workout" is hesitation, not identity framing
+  const clarificationTriggers = [
+    "feel like", "tired", "tomorrow", "don't know", "confused", "can't",
+    "monday", "next week", "restart", "not sure", "maybe", "later",
+    "don't want", "difficult", "struggling", "skip", "too much",
+    "not feeling", "sore", "exhausted", "overwhelmed",
+  ];
+  if (clarificationTriggers.some((t) => lower.includes(t))) {
+    return "clarification";
+  }
+
   // Check for identity framing (positive signals)
   const identityTriggers = ["hard", "stronger", "getting better", "didn't want", "did it", "done", "finished", "completed", "progress", "good"];
   if (identityTriggers.some((t) => lower.includes(t))) {
     return "identityFraming";
   }
 
-  // Check if this is a program action request — don't misclassify as clarification
+  // Program action requests — neutral mode (not identity framing)
   const actionKeywords = ["program", "workout", "exercise", "change", "edit", "modify", "swap", "replace", "show", "recalibrate", "adjust", "customize", "plan"];
   if (actionKeywords.some((t) => lower.includes(t))) {
-    return "identityFraming"; // Treat as action-oriented, not hesitation
-  }
-
-  // Check for clarification (confusion, hesitation, delay)
-  const clarificationTriggers = [
-    "feel like", "tired", "tomorrow", "don't know", "confused", "can't",
-    "Monday", "next week", "restart", "not sure", "maybe", "later",
-    "don't want", "difficult", "struggling",
-  ];
-  if (clarificationTriggers.some((t) => lower.includes(t))) {
-    return "clarification";
+    return "clarification"; // Neutral — let the agent handle the action
   }
 
   // Default to pattern reflection if we have behavioral data
@@ -323,6 +325,8 @@ function getEscalationResponse(): string {
 
 // Detect delay language in user input for the friction engine
 export function containsDelayLanguage(input: string): boolean {
+  // Delay patterns only — reset language ("start over", "restart") is handled separately
+  // by containsResetLanguage to avoid double-counting
   const delayPatterns = [
     "tomorrow",
     "monday",
@@ -332,10 +336,6 @@ export function containsDelayLanguage(input: string): boolean {
     "not today",
     "maybe",
     "next time",
-    "start over",
-    "fresh start",
-    "new beginning",
-    "restart",
   ];
   const lower = input.toLowerCase();
   return delayPatterns.some((pattern) => lower.includes(pattern));

@@ -1,23 +1,21 @@
 import image_649dc395704951058b9543ab59c196ca800a5539 from 'figma:asset/649dc395704951058b9543ab59c196ca800a5539.webp'
-import image_ed2679aab5c84af8a717c4d8b5f3c6d516a31e51 from 'figma:asset/ed2679aab5c84af8a717c4d8b5f3c6d516a31e51.webp'
-import { useState, useEffect, useRef } from "react";
+import { useState, lazy, Suspense } from "react";
 import { useNavigate } from "react-router";
-import { useWallet } from "@solana/wallet-adapter-react";
-import { useWalletModal } from "@solana/wallet-adapter-react-ui";
-import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.webp";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
-import { useAuth } from "../../contexts/AuthContext";
-import { sendEmailSignInLink, signInWithGoogle, signInWithWallet } from "../../../services/auth";
+import { sendEmailSignInLink, signInWithGoogle } from "../../../services/auth";
 import { routeAfterAuth } from "../../utils/routeAfterAuth";
+
+// Lazy-loaded — the entire Solana adapter bundle only fetches when the wallet
+// button is rendered for the first time. Never included in the initial chunk.
+const WalletConnectButton = lazy(() => import("./WalletConnectButton"));
 
 export default function Welcome() {
   const navigate = useNavigate();
-  const { user } = useAuth();
   const { email, setEmail } = useOnboardingStore();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  // Track if wallet connect was explicitly initiated by the user this session
-  const walletInitiated = useRef(false);
+  // showWallet starts false — the lazy chunk only loads after first render of the button
+  const [showWallet, setShowWallet] = useState(false);
 
   const handleContinue = async () => {
     if (!email) return;
@@ -59,75 +57,6 @@ export default function Welcome() {
     } finally {
       setLoading(false);
     }
-  };
-
-  const wallet = useWallet();
-  const walletModal = useWalletModal();
-  // Track the wallet name selected during THIS connect flow (ignore cached selections)
-  const selectedWalletName = useRef<string | null>(null);
-  // Track which pubkey we've already started auth for — prevents double-fire
-  const authedPubkey = useRef<string | null>(null);
-
-  // When user selects a wallet from the modal, close the modal and trigger connect()
-  useEffect(() => {
-    if (!walletInitiated.current) return;
-    // Only connect if this wallet was selected AFTER the modal was opened
-    if (wallet.wallet && wallet.wallet.adapter.name !== selectedWalletName.current) {
-      selectedWalletName.current = wallet.wallet.adapter.name;
-      if (!wallet.connected && !wallet.connecting) {
-        if (walletModal.visible) walletModal.setVisible(false);
-        wallet.connect().catch((err: unknown) => {
-          const e = err as { message?: string };
-          setError(e.message || "Wallet connection failed");
-          setLoading(false);
-        });
-      }
-    }
-    // If modal was opened but no wallet was selected (user dismissed), reset loading
-    if (!wallet.wallet && !walletModal.visible && loading && walletInitiated.current) {
-      setLoading(false);
-    }
-  }, [wallet.wallet, wallet.connected, wallet.connecting, walletModal.visible]);
-
-  // After wallet connects and publicKey is available, authenticate with Firebase via signature
-  useEffect(() => {
-    if (!walletInitiated.current) return;
-    if (!wallet.publicKey || !wallet.signMessage) return;
-    if (user) return;
-
-    const pubkey = wallet.publicKey.toBase58();
-    // Skip if we already started auth for this exact pubkey
-    if (authedPubkey.current === pubkey) return;
-    authedPubkey.current = pubkey;
-
-    setLoading(true);
-    signInWithWallet(pubkey, wallet.signMessage)
-      .then((cred) => {
-        return routeAfterAuth(cred.user.uid, navigate);
-      })
-      .catch((err: unknown) => {
-        const e = err as { message?: string };
-        setError(e.message || "Wallet authentication failed");
-        // Clear so user can retry with same or different wallet
-        authedPubkey.current = null;
-      })
-      .finally(() => setLoading(false));
-  }, [wallet.publicKey, user]);
-
-  const handleWalletConnect = async () => {
-    setError("");
-    setLoading(true);
-    walletInitiated.current = true;
-    selectedWalletName.current = null;
-    authedPubkey.current = null;
-    // Disconnect any cached wallet so the modal shows a fresh selection
-    if (wallet.connected) {
-      await wallet.disconnect();
-    }
-    if (wallet.wallet) {
-      wallet.select(null);
-    }
-    walletModal.setVisible(true);
   };
 
   return (
@@ -207,22 +136,40 @@ export default function Welcome() {
             Sign in with Google
           </button>
 
-          {/* Wallet Connect Button */}
-          <button
-            onClick={handleWalletConnect}
-            disabled={loading}
-            className="w-full border border-white/20 py-3 font-['JetBrains_Mono',monospace] text-[10px] text-white uppercase tracking-wider hover:border-[#ff6600] hover:bg-white/5 transition-colors flex items-center justify-center gap-2 disabled:opacity-30"
-          >
-            <svg className="size-4" fill="none" viewBox="0 0 18 18">
-              <path
-                d="M3.75 5.625H2.25C1.83579 5.625 1.5 5.96079 1.5 6.375V13.5C1.5 13.9142 1.83579 14.25 2.25 14.25H3.75M3.75 5.625V14.25M3.75 5.625H14.25M3.75 14.25H14.25M14.25 5.625H15.75C16.1642 5.625 16.5 5.96079 16.5 6.375V13.5C16.5 13.9142 16.1642 14.25 15.75 14.25H14.25M14.25 5.625V14.25M6 5.625V14.25M12 5.625V14.25M9 2.25V5.625M7.5 3.75H10.5"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="square"
+          {/* Wallet Connect Button — lazy loaded, triggers Solana adapter chunk download on first click */}
+          {!showWallet ? (
+            <button
+              onClick={() => setShowWallet(true)}
+              disabled={loading}
+              className="w-full border border-white/20 py-3 font-['JetBrains_Mono',monospace] text-[10px] text-white uppercase tracking-wider hover:border-[#ff6600] hover:bg-white/5 transition-colors flex items-center justify-center gap-2 disabled:opacity-30"
+            >
+              <svg className="size-4" fill="none" viewBox="0 0 18 18">
+                <path
+                  d="M3.75 5.625H2.25C1.83579 5.625 1.5 5.96079 1.5 6.375V13.5C1.5 13.9142 1.83579 14.25 2.25 14.25H3.75M3.75 5.625V14.25M3.75 5.625H14.25M3.75 14.25H14.25M14.25 5.625H15.75C16.1642 5.625 16.5 5.96079 16.5 6.375V13.5C16.5 13.9142 16.1642 14.25 15.75 14.25H14.25M14.25 5.625V14.25M6 5.625V14.25M12 5.625V14.25M9 2.25V5.625M7.5 3.75H10.5"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="square"
+                />
+              </svg>
+              Connect Wallet
+            </button>
+          ) : (
+            <Suspense
+              fallback={
+                <button
+                  disabled
+                  className="w-full border border-white/20 py-3 font-['JetBrains_Mono',monospace] text-[10px] text-white/40 uppercase tracking-wider flex items-center justify-center gap-2 cursor-wait"
+                >
+                  Loading...
+                </button>
+              }
+            >
+              <WalletConnectButton
+                onError={setError}
+                onLoadingChange={setLoading}
               />
-            </svg>
-            Connect Wallet
-          </button>
+            </Suspense>
+          )}
         </div>
 
         {/* Terms */}

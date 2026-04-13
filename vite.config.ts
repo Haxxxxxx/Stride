@@ -54,9 +54,18 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          firebase: ['firebase/app', 'firebase/auth', 'firebase/firestore', 'firebase/storage', 'firebase/ai', 'firebase/functions'],
-          solana: ['@solana/web3.js', '@solana/wallet-adapter-base', '@solana/wallet-adapter-react'],
-          vendor: ['react', 'react-dom', 'react-router', 'zustand'],
+          // React core — changes rarely, excellent cache hit rate
+          'react-vendor': ['react', 'react-dom'],
+          // Router — changes less often than app code
+          'router': ['react-router'],
+          // Firebase core — needed on every page (auth gate)
+          'firebase-core': ['firebase/app', 'firebase/auth'],
+          // Firebase services — heavier modules, only needed after auth
+          'firebase-services': ['firebase/firestore', 'firebase/storage', 'firebase/ai', 'firebase/functions', 'firebase/app-check'],
+          // Solana — isolated to lazy-loaded WalletConnectButton
+          'solana': ['@solana/web3.js', '@solana/wallet-adapter-base', '@solana/wallet-adapter-react'],
+          // State + utilities
+          'state': ['zustand'],
         },
       },
     },

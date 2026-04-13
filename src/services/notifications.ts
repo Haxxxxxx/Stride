@@ -96,7 +96,7 @@ export async function notifyProgramGenerated(
 // ── Streak milestone check ─────────────────────────────
 // Call after updating streak; fires notification at milestones
 
-const STREAK_MILESTONES = [3, 7, 14, 21, 30, 60, 90, 100, 180, 365];
+const STREAK_MILESTONES = [3, 7, 14, 21, 30, 50, 60, 75, 90, 100, 180, 365];
 
 export function isStreakMilestone(streakDays: number): boolean {
   return STREAK_MILESTONES.includes(streakDays);

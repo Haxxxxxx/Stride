@@ -2,11 +2,13 @@ import { useState, useEffect } from "react";
 import { Timestamp } from "firebase/firestore";
 import { useAuth } from "../contexts/AuthContext";
 import {
-  queryCollection,
+  subscribeToCollection,
   updateDocument,
   batchWrite,
   orderBy,
+  limit,
 } from "../../services/firestore";
+import { parseTimestamp } from "../utils/dateUtils";
 
 interface Notification {
   id: string;
@@ -35,16 +37,20 @@ export default function Notifications() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "unread" | "system" | "challenge">("all");
+  const [bulkProcessing, setBulkProcessing] = useState(false);
 
-  // Load notifications from Firestore
+  // Real-time notifications listener
   useEffect(() => {
     if (!user) return;
-    queryCollection<Notification>(`users/${user.uid}/notifications`, [
-      orderBy("createdAt", "desc"),
-    ])
-      .then((docs) => setNotifications(docs))
-      .catch(console.warn)
-      .finally(() => setLoading(false));
+    const unsub = subscribeToCollection<Notification>(
+      `users/${user.uid}/notifications`,
+      [orderBy("createdAt", "desc"), limit(200)],
+      (docs) => {
+        setNotifications(docs);
+        setLoading(false);
+      }
+    );
+    return unsub;
   }, [user]);
 
   const getTypeIcon = (type: string) => {
@@ -90,31 +96,46 @@ export default function Notifications() {
 
   // Mark all as read
   const handleMarkAllRead = async () => {
-    if (!user) return;
+    if (!user || bulkProcessing) return;
     const unread = notifications.filter((n) => !n.read);
     if (unread.length === 0) return;
-    await batchWrite(
-      unread.map((n) => ({
-        type: "update" as const,
-        path: `users/${user.uid}/notifications/${n.id}`,
-        data: { read: true },
-      }))
-    );
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    setBulkProcessing(true);
+    try {
+      await batchWrite(
+        unread.map((n) => ({
+          type: "update" as const,
+          path: `users/${user.uid}/notifications/${n.id}`,
+          data: { read: true },
+        }))
+      );
+      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    } catch (err) {
+      console.warn("Failed to mark all as read:", err);
+    } finally {
+      setBulkProcessing(false);
+    }
   };
 
   // Clear read notifications
   const handleClearRead = async () => {
-    if (!user) return;
+    if (!user || bulkProcessing) return;
     const readNotifs = notifications.filter((n) => n.read);
     if (readNotifs.length === 0) return;
-    await batchWrite(
-      readNotifs.map((n) => ({
-        type: "delete" as const,
-        path: `users/${user.uid}/notifications/${n.id}`,
-      }))
-    );
-    setNotifications((prev) => prev.filter((n) => !n.read));
+    if (!window.confirm(`Clear ${readNotifs.length} read alert${readNotifs.length !== 1 ? "s" : ""}? This cannot be undone.`)) return;
+    setBulkProcessing(true);
+    try {
+      await batchWrite(
+        readNotifs.map((n) => ({
+          type: "delete" as const,
+          path: `users/${user.uid}/notifications/${n.id}`,
+        }))
+      );
+      setNotifications((prev) => prev.filter((n) => !n.read));
+    } catch (err) {
+      console.warn("Failed to clear read notifications:", err);
+    } finally {
+      setBulkProcessing(false);
+    }
   };
 
   // Mark single as read on click
@@ -233,7 +254,7 @@ export default function Notifications() {
                       {notification.title}
                     </div>
                     <div className="font-['JetBrains_Mono',monospace] text-[9px] text-white/40 uppercase shrink-0">
-                      {notification.createdAt ? timeAgo(notification.createdAt.toDate()) : ""}
+                      {notification.createdAt ? timeAgo(new Date(parseTimestamp(notification.createdAt))) : ""}
                     </div>
                   </div>
 
@@ -290,23 +311,23 @@ export default function Notifications() {
       <div className="mt-6 grid grid-cols-2 gap-3">
         <button
           onClick={handleMarkAllRead}
-          disabled={unreadCount === 0}
+          disabled={unreadCount === 0 || bulkProcessing}
           className="border border-white/20 text-white font-['JetBrains_Mono',monospace] text-[10px] uppercase tracking-wider py-3 hover:bg-white/5 transition-colors disabled:opacity-30"
         >
-          Mark All Read
+          {bulkProcessing ? "Processing..." : "Mark All Read"}
         </button>
         <button
           onClick={handleClearRead}
-          disabled={notifications.filter((n) => n.read).length === 0}
+          disabled={notifications.filter((n) => n.read).length === 0 || bulkProcessing}
           className="border border-white/20 text-white/60 font-['JetBrains_Mono',monospace] text-[10px] uppercase tracking-wider py-3 hover:bg-white/5 transition-colors disabled:opacity-30"
         >
-          Clear Read
+          {bulkProcessing ? "Processing..." : "Clear Read"}
         </button>
       </div>
 
       {/* System Info */}
       <div className="mt-6 border-t border-white/10 pt-4">
-        <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/30 uppercase tracking-wider text-center">
+        <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/50 uppercase tracking-wider text-center">
           {notifications.length} total alerts
         </div>
       </div>

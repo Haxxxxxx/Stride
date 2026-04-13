@@ -88,7 +88,19 @@ export async function signInWithWallet(
 }
 
 export async function logOut() {
-  return signOut(auth);
+  await signOut(auth);
+  // Clear all STRIDE localStorage to prevent cross-user data contamination
+  const strideKeys = [
+    "stride_behavior_state",
+    "stride_chat_history",
+    "stride_miss_check_lock",
+    "stride_workout_wip",
+    "stride_bonus_workout",
+    "emailForSignIn",
+  ];
+  for (const key of strideKeys) {
+    localStorage.removeItem(key);
+  }
 }
 
 export function onAuthChange(callback: (user: User | null) => void) {

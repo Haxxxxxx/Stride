@@ -1,6 +1,5 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router";
-import svgPaths from "../../../imports/svg-v0sj4hk01y";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { useAuth } from "../../contexts/AuthContext";
 import { setDocument, batchWrite } from "../../../services/firestore";
@@ -31,10 +30,12 @@ export default function ProgramForging() {
   useEffect(() => {
     if (startedRef.current || !user) return;
     startedRef.current = true;
+    let cancelled = false;
 
     const run = async () => {
       try {
         // Stage 1: Save personalization (0→25%, quick)
+        if (cancelled) return;
         setStage("saving");
         startAsymptotic(0, 25);
 
@@ -57,17 +58,19 @@ export default function ProgramForging() {
           ...personalization,
           height: store.height,
           weight: store.weight,
-          goalWeight: store.goalWeight,
+          ...(store.optimizationGoal === "fat-loss" ? { goalWeight: store.goalWeight } : {}),
           selectedAgent: store.selectedAgent,
         });
 
         // Stage 2: Generate program via LLM (25→92%, slow — this is the long one)
+        if (cancelled) return;
         setStage("generating");
         startAsymptotic(25, 92);
 
         const program = await generateProgram(personalization);
 
         // Stage 3: Store program in Firestore (92→99%)
+        if (cancelled) return;
         setStage("storing");
         startAsymptotic(92, 99);
 
@@ -89,11 +92,13 @@ export default function ProgramForging() {
         notifyProgramGenerated(user.uid, program.name).catch(console.warn);
 
         // Done — kill animation and snap to 100%
+        if (cancelled) return;
         stopAnimation();
         store.reset();
         setStage("done");
         setProgress(100);
       } catch (err) {
+        if (cancelled) return;
         stopAnimation();
         console.error("Program forging failed:", err);
         setStage("error");
@@ -102,6 +107,11 @@ export default function ProgramForging() {
     };
 
     run();
+
+    return () => {
+      cancelled = true;
+      stopAnimation();
+    };
   }, [user]);
 
   const stopAnimation = () => {

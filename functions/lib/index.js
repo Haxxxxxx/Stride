@@ -36,7 +36,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.backfillParticipantProfiles = exports.triggerStatsRefresh = exports.onUserChange = exports.sendSignInEmail = exports.validateBetaCode = exports.walletSignIn = void 0;
+exports.backfillCompletedAtMs = exports.backfillParticipantProfiles = exports.triggerStatsRefresh = exports.onUserChange = exports.sendSignInEmail = exports.validateBetaCode = exports.walletSignIn = void 0;
 const https_1 = require("firebase-functions/v2/https");
 const firestore_1 = require("firebase-functions/v2/firestore");
 const params_1 = require("firebase-functions/params");
@@ -455,6 +455,49 @@ exports.backfillParticipantProfiles = (0, https_1.onCall)(async (request) => {
                 progress: Math.min(Math.round(progress), 100),
             });
             updated++;
+        }
+    }
+    return { success: true, updated };
+});
+/**
+ * One-time backfill: add completedAtMs (epoch) to all workoutLogs that lack it.
+ * After running, queries can switch from completedAt string to completedAtMs number.
+ */
+exports.backfillCompletedAtMs = (0, https_1.onCall)(async (request) => {
+    if (!request.auth)
+        throw new https_1.HttpsError("unauthenticated", "Authentication required.");
+    if (!ADMIN_EMAILS.includes(request.auth.token?.email || "")) {
+        throw new https_1.HttpsError("permission-denied", "Admin access required.");
+    }
+    const firestore = admin.firestore();
+    const usersSnap = await firestore.collection("users").get();
+    let updated = 0;
+    for (const userDoc of usersSnap.docs) {
+        const logsSnap = await firestore.collection(`users/${userDoc.id}/workoutLogs`).get();
+        let batch = firestore.batch();
+        let batchCount = 0;
+        for (const logDoc of logsSnap.docs) {
+            const data = logDoc.data();
+            if (data.completedAtMs)
+                continue;
+            const completedAt = data.completedAt;
+            if (!completedAt)
+                continue;
+            const ms = new Date(completedAt).getTime();
+            if (isNaN(ms))
+                continue;
+            batch.update(logDoc.ref, { completedAtMs: ms });
+            batchCount++;
+            if (batchCount >= 499) {
+                await batch.commit();
+                updated += batchCount;
+                batch = firestore.batch();
+                batchCount = 0;
+            }
+        }
+        if (batchCount > 0) {
+            await batch.commit();
+            updated += batchCount;
         }
     }
     return { success: true, updated };

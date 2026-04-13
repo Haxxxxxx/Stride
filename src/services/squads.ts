@@ -1,5 +1,6 @@
 import {
   getDocument,
+  updateDocument,
   batchWrite,
   queryCollection,
   where,
@@ -7,6 +8,7 @@ import {
   serverTimestamp,
   increment,
   arrayUnion,
+  arrayRemove,
 } from "./firestore";
 
 // ── Types ──────────────────────────────────────────────
@@ -108,6 +110,13 @@ export async function getUserSquads(uid: string): Promise<Squad[]> {
     squads.push(...results);
   }
 
+  // Self-heal: prune stale squadIds (deleted squads) to prevent monotonic growth
+  const foundIds = new Set(squads.map(s => s.id));
+  const staleIds = squadIds.filter(id => !foundIds.has(id));
+  if (staleIds.length > 0) {
+    updateDocument(`users/${uid}`, { squadIds: arrayRemove(...staleIds) }).catch(() => {});
+  }
+
   return squads;
 }
 
@@ -162,7 +171,7 @@ export async function joinSquadByCode(
   shareProgress: boolean,
   callsign?: string,
   avatarUrl?: string
-): Promise<{ success: boolean; squadId?: string; error?: string }> {
+): Promise<{ success: boolean; squadId?: string; squadName?: string; error?: string }> {
   const squad = await getSquadByCode(code);
   if (!squad) return { success: false, error: "Invalid squad code" };
 
@@ -170,5 +179,44 @@ export async function joinSquadByCode(
   if (alreadyMember) return { success: false, error: "Already a member" };
 
   await joinSquad(squad.id, uid, shareProgress, callsign, avatarUrl);
-  return { success: true, squadId: squad.id };
+  return { success: true, squadId: squad.id, squadName: squad.name };
+}
+
+// ── Leave / Delete / Update ──────────────────────────
+
+/** Leave a squad (member removes themselves) */
+export async function leaveSquad(squadId: string, uid: string): Promise<void> {
+  await batchWrite([
+    { type: "delete", path: `squads/${squadId}/members/${uid}` },
+    { type: "update", path: `squads/${squadId}`, data: { memberCount: increment(-1) } },
+    { type: "update", path: `users/${uid}`, data: { squadIds: arrayRemove(squadId) } },
+  ]);
+}
+
+/** Delete a squad (creator only).
+ *  Firestore rules only allow users to delete their OWN member doc,
+ *  so the creator can only clean up their own membership + the squad doc.
+ *  Other members' member docs become orphaned and are handled gracefully:
+ *  - getUserSquads will return "squad not found" for the deleted squad
+ *  - The orphaned member docs have no security impact (read-only for others)
+ */
+export async function deleteSquad(squadId: string, uid: string): Promise<void> {
+  const ops: Parameters<typeof batchWrite>[0] = [];
+
+  // Clean up creator's own membership (rules allow: request.auth.uid == uid)
+  ops.push({ type: "update", path: `users/${uid}`, data: { squadIds: arrayRemove(squadId) } });
+  ops.push({ type: "delete", path: `squads/${squadId}/members/${uid}` });
+
+  // Delete the squad doc (rules allow: resource.data.createdBy == request.auth.uid)
+  ops.push({ type: "delete", path: `squads/${squadId}` });
+
+  await batchWrite(ops);
+}
+
+/** Update squad name/type (creator only) */
+export async function updateSquadInfo(
+  squadId: string,
+  updates: { name?: string; type?: string }
+): Promise<void> {
+  await updateDocument(`squads/${squadId}`, updates);
 }

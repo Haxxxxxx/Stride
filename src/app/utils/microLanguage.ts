@@ -8,7 +8,7 @@ import { getBehaviorState, updateBehaviorState } from "./behaviorStore";
 // 1. LOGIN TRIGGER (user opens app)
 // Tone: Awareness / Intent Priming
 // ============================================================
-export const LOGIN_MESSAGES = [
+const LOGIN_MESSAGES = [
   "System active. Intent?",
   "Comfort is active. Override?",
   "What repeats reinforces.",
@@ -25,7 +25,7 @@ export const LOGIN_MESSAGES = [
 // 2. WORKOUT START TRIGGER (user taps "Start Workout")
 // Tone: Decision Reinforcement
 // ============================================================
-export const WORKOUT_START_MESSAGES = [
+const WORKOUT_START_MESSAGES = [
   "Mood not required.",
   "Begin despite preference.",
   "Action > emotion.",
@@ -42,7 +42,7 @@ export const WORKOUT_START_MESSAGES = [
 // 3. HESITATION TRIGGER (user opens workout but idles 30-60s)
 // Tone: Pattern Interrupt (Calm Confrontation)
 // ============================================================
-export const HESITATION_MESSAGES = [
+const HESITATION_MESSAGES = [
   "Delay detected. Reason?",
   "Negotiation is active.",
   "You opened this for a reason.",
@@ -59,7 +59,7 @@ export const HESITATION_MESSAGES = [
 // 4. WORKOUT COMPLETION TRIGGER (workout marked complete)
 // Tone: Identity Anchoring
 // ============================================================
-export const WORKOUT_COMPLETION_MESSAGES = [
+const WORKOUT_COMPLETION_MESSAGES = [
   "Execution confirmed.",
   "You acted independent of mood.",
   "Signal > preference.",
@@ -76,7 +76,7 @@ export const WORKOUT_COMPLETION_MESSAGES = [
 // 5. MISSED WORKOUT TRIGGER (scheduled workout skipped)
 // Tone: Neutral Confrontation / Reflection
 // ============================================================
-export const MISSED_WORKOUT_MESSAGES = [
+const MISSED_WORKOUT_MESSAGES = [
   "Session skipped. Cause?",
   "Avoidance logged.",
   "Pattern deviation detected.",
@@ -93,22 +93,26 @@ export const MISSED_WORKOUT_MESSAGES = [
 // 6. STREAK MILESTONE TRIGGERS
 // Tone: Pattern Stabilization
 // ============================================================
-export const STREAK_MILESTONES: Record<number, string> = {
+const STREAK_MILESTONES: Record<number, string> = {
   3: "Early pattern forming.",
   7: "Consistency emerging.",
   14: "Repetition gaining weight.",
   21: "Identity stabilizing.",
   30: "This is no longer experimental.",
   50: "Structural discipline.",
+  60: "Threshold exceeded.",
   75: "Hard to break now.",
+  90: "Operating system installed.",
   100: "This is baseline.",
+  180: "Half a year. Undeniable.",
+  365: "One year. You are the system.",
 };
 
 // ============================================================
 // 7. STREAK BROKEN TRIGGER
 // Tone: Calm Re-entry
 // ============================================================
-export const STREAK_BROKEN_MESSAGES = [
+const STREAK_BROKEN_MESSAGES = [
   "Pattern interrupted.",
   "Restart without drama.",
   "You are not your lapse.",
@@ -122,7 +126,7 @@ export const STREAK_BROKEN_MESSAGES = [
 // 8. WEEKLY PATTERN INSIGHTS (every 7-14 days)
 // Tone: Observational / Analytical
 // ============================================================
-export const WEEKLY_INSIGHT_MESSAGES = [
+const WEEKLY_INSIGHT_MESSAGES = [
   "You train hardest on high-energy days.",
   "Low-energy days correlate with delay.",
   "Volume increased 12% this week.",
@@ -139,7 +143,7 @@ export const WEEKLY_INSIGHT_MESSAGES = [
 // POST-WORKOUT NEUROPLASTIC ENCODING
 // High-impact identity sentences for the post-effort window
 // ============================================================
-export const NEUROPLASTIC_FULL_SESSION = [
+const NEUROPLASTIC_FULL_SESSION = [
   "You proved mood is irrelevant.",
   "Decision executed. Identity encoded.",
   "Operator confirmed.",
@@ -150,14 +154,14 @@ export const NEUROPLASTIC_FULL_SESSION = [
   "This is who you are becoming.",
 ];
 
-export const NEUROPLASTIC_EARLY_STOP = [
+const NEUROPLASTIC_EARLY_STOP = [
   "Incomplete signal logged.",
   "Partial execution recorded.",
   "The attempt counts. Continue tomorrow.",
   "Momentum preserved.",
 ];
 
-export const NEUROPLASTIC_INCREASED_INTENSITY = [
+const NEUROPLASTIC_INCREASED_INTENSITY = [
   "Capacity expanded.",
   "New threshold established.",
   "You exceeded prior limits.",

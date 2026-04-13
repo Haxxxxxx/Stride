@@ -126,6 +126,12 @@
 
   body {
     @apply bg-background text-foreground;
+    touch-action: manipulation;
+  }
+
+  /* Prevent iOS Safari auto-zoom on input focus (requires font-size >= 16px) */
+  input, select, textarea {
+    font-size: 16px !important;
   }
 
   /**
@@ -177,5 +183,13 @@
     font-size: var(--text-base);
     font-weight: var(--font-weight-normal);
     line-height: 1.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

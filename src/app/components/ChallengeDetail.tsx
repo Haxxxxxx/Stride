@@ -1,151 +1,26 @@
-import { Link, useParams } from "react-router";
 import { useState, useEffect } from "react";
-import imgImage8 from "figma:asset/24b6a62b7bae129c46221394e6598883d13abaec.webp";
-import imgImage12 from "figma:asset/dd40dbe95c08e8ffafa5e44173f6b8033e5ccfed.webp";
-import imgImage10 from "figma:asset/f66d8c8b01a14e7f20794613021e602bd29e44f5.webp";
-import imgImage2 from "figma:asset/fa12b2e954b8d8835c7af0f64149782f3496b2f7.webp";
+import { Link, useParams, useNavigate } from "react-router";
 import { useAuth } from "../contexts/AuthContext";
-import { getDocument } from "../../services/firestore";
 import {
   type Challenge,
   type ChallengeParticipant,
   getChallenge,
   getChallengeParticipants,
+  leaveChallenge,
   daysRemaining,
+  syncParticipantProfile,
 } from "../../services/challenges";
+import { getDocument } from "../../services/firestore";
 import { getBehaviorState } from "../utils/behaviorStore";
+import { Scanline } from "./Scanline";
+import UserProfileModal, { type ProfileModalUser } from "./UserProfileModal";
 
-const fallbackAvatars = [imgImage8, imgImage12, imgImage10, imgImage2];
-
-// User Profile Modal — loads real data from Firestore when sharing is enabled
-function UserProfileModal({
-  isOpen,
-  onClose,
-  user,
-}: {
-  isOpen: boolean;
-  onClose: () => void;
-  user: { uid: string; name: string; avatar: string; sharingProgress: boolean } | null;
-}) {
-  const [stats, setStats] = useState<{ streakDays: number; totalWorkoutsCompleted: number; alignmentScore: number } | null>(null);
-  const [recentLogs, setRecentLogs] = useState<{ workoutName: string; completedAt: string }[]>([]);
-
-  useEffect(() => {
-    if (!user?.sharingProgress || !user.uid) return;
-    // Load behavior state
-    getDocument<{ streakDays?: number; totalWorkoutsCompleted?: number; alignmentScore?: number }>(
-      `users/${user.uid}/behaviorState/data`
-    )
-      .then((doc) => {
-        if (doc) setStats({ streakDays: doc.streakDays ?? 0, totalWorkoutsCompleted: doc.totalWorkoutsCompleted ?? 0, alignmentScore: doc.alignmentScore ?? 50 });
-      })
-      .catch(console.warn);
-    // Load recent workout logs
-    import("../../services/firestore").then(({ queryCollection, orderBy, limit }) => {
-      queryCollection<{ workoutName: string; completedAt: string }>(
-        `users/${user.uid}/workoutLogs`,
-        [orderBy("completedAt", "desc"), limit(3)]
-      )
-        .then(setRecentLogs)
-        .catch(console.warn);
-    });
-  }, [user]);
-
-  if (!isOpen || !user) return null;
-
+function AvatarPlaceholder() {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-black/90" onClick={onClose} />
-      <div className="relative z-10 w-full max-w-md border-2 border-[#ff6600] bg-black p-6">
-        <div className="absolute inset-0 pointer-events-none opacity-[0.03]" style={{
-          backgroundImage: `repeating-linear-gradient(0deg, transparent, transparent 1px, white 2px, white 2px)`,
-          backgroundSize: '100% 4px'
-        }} />
-        <div className="relative z-10">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="size-12 overflow-hidden border-2 border-[#ff6600]">
-                <img src={user.avatar} alt={user.name} className="size-full object-cover" />
-              </div>
-              <div>
-                <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/40 uppercase tracking-[2px]">
-                  Operator Profile
-                </div>
-                <div className="font-['JetBrains_Mono',monospace] text-[16px] text-white font-bold">
-                  {user.name}
-                </div>
-              </div>
-            </div>
-            <button onClick={onClose} className="size-8 border border-white/30 flex items-center justify-center hover:border-[#ff6600] transition-colors">
-              <svg className="size-5" fill="none" viewBox="0 0 24 24" stroke="white">
-                <path strokeLinecap="square" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-
-          {user.sharingProgress ? (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="border border-white/20 p-4">
-                  <div className="font-['JetBrains_Mono',monospace] text-[20px] text-[#ff6600] font-bold">
-                    {stats?.streakDays ?? 0}
-                  </div>
-                  <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider">Day Streak</div>
-                </div>
-                <div className="border border-white/20 p-4">
-                  <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
-                    {stats?.totalWorkoutsCompleted ?? 0}
-                  </div>
-                  <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider">Total Sessions</div>
-                </div>
-                <div className="border border-white/20 p-4">
-                  <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
-                    {stats?.alignmentScore ?? 50}%
-                  </div>
-                  <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider">Alignment</div>
-                </div>
-                <div className="border border-white/20 p-4">
-                  <div className="font-['JetBrains_Mono',monospace] text-[20px] text-white font-bold">
-                    {recentLogs.length}
-                  </div>
-                  <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider">Recent Ops</div>
-                </div>
-              </div>
-              <div className="border border-white/20 p-4">
-                <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/60 uppercase tracking-wider mb-3">Recent Activity</div>
-                <div className="space-y-2">
-                  {recentLogs.length > 0 ? recentLogs.map((log, idx) => (
-                    <div key={idx} className="flex items-center justify-between py-2 border-b border-white/10 last:border-0">
-                      <div>
-                        <div className="font-['JetBrains_Mono',monospace] text-[9px] text-white">{log.workoutName}</div>
-                        <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40">
-                          {new Date(log.completedAt).toLocaleDateString()}
-                        </div>
-                      </div>
-                      <div className="size-2 bg-[#ff6600]" />
-                    </div>
-                  )) : (
-                    <div className="font-['JetBrains_Mono',monospace] text-[9px] text-white/40">No recent activity</div>
-                  )}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="border border-white/20 p-6 text-center">
-              <div className="font-['JetBrains_Mono',monospace] text-[12px] text-white/60 uppercase tracking-wider mb-4">
-                Progress Card Private
-              </div>
-              <div className="font-['JetBrains_Mono',monospace] text-[9px] text-white/40 mb-6">
-                This operator has not shared their detailed progress metrics with the challenge.
-              </div>
-              <div className="border border-white/20 p-4 inline-block">
-                <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/60 uppercase tracking-wider mb-2">Public Stats</div>
-                <div className="font-['JetBrains_Mono',monospace] text-[16px] text-white font-bold">Active Participant</div>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+    <div className="size-full bg-white/10 flex items-center justify-center">
+      <svg className="size-3 text-white/30" fill="currentColor" viewBox="0 0 24 24">
+        <path d="M12 12c2.5 0 4.5-2 4.5-4.5S14.5 3 12 3 7.5 5 7.5 7.5 9.5 12 12 12zm0 2c-3.33 0-10 1.67-10 5v2h20v-2c0-3.33-6.67-5-10-5z" />
+      </svg>
     </div>
   );
 }
@@ -153,29 +28,60 @@ function UserProfileModal({
 export default function ChallengeDetail() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
-  const [showProfileModal, setShowProfileModal] = useState<{ uid: string; name: string; avatar: string; sharingProgress: boolean } | null>(null);
+  const navigate = useNavigate();
+  const [showProfileModal, setShowProfileModal] = useState<ProfileModalUser | null>(null);
   const [challenge, setChallenge] = useState<Challenge | null>(null);
   const [participants, setParticipants] = useState<ChallengeParticipant[]>([]);
   const [loading, setLoading] = useState(true);
+  const [leaving, setLeaving] = useState(false);
 
-  // User's own progress from behaviorStore
+  // User's own progress from behaviorStore, calculated per challenge targetType
   const behaviorState = getBehaviorState();
-  const userProgress = Math.round(
-    (behaviorState.workoutsCompletedThisWeek /
-      Math.max(behaviorState.workoutsCompletedThisWeek + behaviorState.workoutsSkippedThisWeek, 1)) *
-      100
-  );
+  const userProgress = (() => {
+    if (!challenge) return 0;
+    switch (challenge.targetType) {
+      case "consistency": {
+        const completed14d = behaviorState.workoutsCompleted14d ?? behaviorState.workoutsCompletedThisWeek;
+        const skipped14d = behaviorState.workoutsSkipped14d ?? behaviorState.workoutsSkippedThisWeek;
+        const total = completed14d + skipped14d;
+        return total > 0 ? Math.round((completed14d / total) * 100) : 0;
+      }
+      case "streak":
+        return Math.min(Math.round((behaviorState.streakDays / challenge.target) * 100), 100);
+      case "workouts":
+        return Math.min(Math.round((behaviorState.totalWorkoutsCompleted / challenge.target) * 100), 100);
+      default:
+        return 0;
+    }
+  })();
 
   useEffect(() => {
     if (!id) return;
-    Promise.all([getChallenge(id), getChallengeParticipants(id)])
-      .then(([c, p]) => {
+
+    async function load() {
+      try {
+        const [c, p] = await Promise.all([getChallenge(id!), getChallengeParticipants(id!)]);
         setChallenge(c);
         setParticipants(p);
-      })
-      .catch(console.warn)
-      .finally(() => setLoading(false));
-  }, [id]);
+
+        // Sync current user's avatar/callsign then re-fetch participants so UI is fresh
+        if (user) {
+          const profile = await getDocument<{ callsign?: string; avatarUrl?: string }>(`users/${user.uid}`);
+          if (profile) {
+            await syncParticipantProfile(user.uid, profile.callsign ?? "", profile.avatarUrl ?? "");
+            const updated = await getChallengeParticipants(id!);
+            setParticipants(updated);
+          }
+        }
+      } catch (err) {
+        console.warn(err);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    load();
+  }, [id, user]);
 
   if (loading) {
     return (
@@ -183,6 +89,19 @@ export default function ChallengeDetail() {
         <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/40 uppercase tracking-wider animate-pulse">
           Loading challenge...
         </div>
+      </div>
+    );
+  }
+
+  if (!challenge) {
+    return (
+      <div className="w-full p-6 pb-24 text-center">
+        <Link to="/app/challenges" className="inline-flex items-center gap-2 text-white/60 hover:text-white transition-colors mb-6 font-['JetBrains_Mono',monospace] text-[10px] uppercase tracking-wider">
+          ← Back to Challenges
+        </Link>
+        <p className="font-['JetBrains_Mono',monospace] text-[12px] text-white/40 uppercase tracking-wider mt-8">
+          This challenge has ended or was removed.
+        </p>
       </div>
     );
   }
@@ -209,10 +128,7 @@ export default function ChallengeDetail() {
 
       {/* Featured Challenge Card */}
       <div className="border-2 border-[#ff6600] bg-[#ff6600]/5 p-5 mb-6 relative">
-        <div className="absolute inset-0 pointer-events-none opacity-[0.03]" style={{
-          backgroundImage: `repeating-linear-gradient(0deg, transparent, transparent 1px, white 2px, white 2px)`,
-          backgroundSize: '100% 4px'
-        }} />
+        <Scanline />
 
         <div className="relative z-10">
           <div className="flex items-start justify-between gap-6 mb-4">
@@ -237,13 +153,17 @@ export default function ChallengeDetail() {
                 <circle cx="32" cy="32" r="28" fill="none" stroke="white" strokeOpacity="0.2" strokeWidth="4" />
                 <circle
                   cx="32" cy="32" r="28" fill="none" stroke="#ff6600" strokeWidth="4"
-                  strokeDasharray={`${2 * Math.PI * 28 * ((challenge?.target ?? 80) / 100)} ${2 * Math.PI * 28}`}
+                  strokeDasharray={`${2 * Math.PI * 28 * (userProgress / 100)} ${2 * Math.PI * 28}`}
                   strokeLinecap="square" transform="rotate(-90 32 32)"
                 />
               </svg>
               <div className="absolute inset-0 flex flex-col items-center justify-center">
                 <div className="font-['JetBrains_Mono',monospace] text-[14px] text-[#ff6600] font-bold">
-                  {challenge?.target ?? 80}%
+                  {challenge?.targetType === "consistency"
+                    ? `${challenge.target}%`
+                    : challenge?.targetType === "streak"
+                    ? `${challenge.target}d`
+                    : `${challenge.target}`}
                 </div>
                 <svg className="size-4 mt-0.5" fill="none" viewBox="0 0 16 16">
                   <path
@@ -257,12 +177,10 @@ export default function ChallengeDetail() {
         </div>
       </div>
 
-      {/* Your Progress Card */}
+      {/* Your Progress Card — only shown if user has joined this challenge */}
+      {user && participants.some(p => p.id === user.uid) && (
       <div className="border border-white/20 p-5 mb-6 relative">
-        <div className="absolute inset-0 pointer-events-none opacity-[0.03]" style={{
-          backgroundImage: `repeating-linear-gradient(0deg, transparent, transparent 1px, white 2px, white 2px)`,
-          backgroundSize: '100% 4px'
-        }} />
+        <Scanline />
 
         <div className="relative z-10">
           <div className="flex items-center justify-between mb-4">
@@ -271,7 +189,7 @@ export default function ChallengeDetail() {
                 Your Progress
               </div>
               <div className="font-['JetBrains_Mono',monospace] text-[9px] text-white/60 uppercase">
-                Current consistency
+                {challenge?.targetType === "streak" ? "Streak progress" : challenge?.targetType === "workouts" ? "Sessions progress" : "Current consistency"}
               </div>
             </div>
             <div className="font-['JetBrains_Mono',monospace] text-[28px] text-[#ff6600] font-bold">
@@ -285,8 +203,30 @@ export default function ChallengeDetail() {
               style={{ width: `${Math.min(userProgress, 100)}%` }}
             />
           </div>
+
+          {/* Leave Challenge Button */}
+          <button
+            onClick={async () => {
+              if (!user || !id) return;
+              if (!confirm("Leave this challenge?")) return;
+              setLeaving(true);
+              try {
+                await leaveChallenge(id, user.uid);
+                navigate("/app/challenges");
+              } catch (err) {
+                console.warn("Failed to leave challenge:", err);
+                setLeaving(false);
+                window.alert("Failed to leave challenge. Check your connection and try again.");
+              }
+            }}
+            disabled={leaving}
+            className="mt-4 w-full border border-white/20 py-2 font-['JetBrains_Mono',monospace] text-[9px] text-white/50 uppercase tracking-wider hover:border-red-500/50 hover:text-red-400 transition-colors disabled:opacity-50"
+          >
+            {leaving ? "Leaving..." : "Leave Challenge"}
+          </button>
         </div>
       </div>
+      )}
 
       {/* Participants List */}
       <div className="border border-white/20 p-5">
@@ -303,7 +243,6 @@ export default function ChallengeDetail() {
             participants.map((p, idx) => {
               const rank = idx + 1;
               const isCurrentUser = p.id === user?.uid;
-              const avatar = fallbackAvatars[idx % fallbackAvatars.length];
               return (
                 <div
                   key={p.id}
@@ -315,8 +254,12 @@ export default function ChallengeDetail() {
                     setShowProfileModal({
                       uid: p.id,
                       name: p.callsign || `Operator #${rank}`,
-                      avatar,
+                      avatar: p.avatarUrl || "",
                       sharingProgress: p.shareProgress,
+                      streakDays: p.streakDays,
+                      totalWorkoutsCompleted: p.totalWorkoutsCompleted,
+                      alignmentScore: p.alignmentScore,
+                      progress: p.progress,
                     })
                   }
                 >
@@ -325,7 +268,11 @@ export default function ChallengeDetail() {
                       #{rank.toString().padStart(2, "0")}
                     </div>
                     <div className="size-6 overflow-hidden">
-                      <img src={avatar} alt="" className="size-full object-cover" />
+                      {p.avatarUrl ? (
+                        <img src={p.avatarUrl} alt="" className="size-full object-cover" />
+                      ) : (
+                        <AvatarPlaceholder />
+                      )}
                     </div>
                     <div className="font-['JetBrains_Mono',monospace] text-[11px] text-white">
                       {p.callsign || `Operator #${rank}`}

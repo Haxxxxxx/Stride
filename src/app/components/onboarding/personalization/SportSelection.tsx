@@ -20,7 +20,7 @@ export default function SportSelection() {
     {
       value: "field-court",
       label: "Field / Court Sports",
-      description: "Football, Soccer, Basketball, Lacrosse, Rugby",
+      description: "Football, Soccer, Basketball, Baseball, Lacrosse, Rugby",
     },
     {
       value: "combat",

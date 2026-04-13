@@ -23,7 +23,11 @@ service cloud.firestore {
         allow read, create, update: if request.auth != null && request.auth.uid == uid;
       }
       match /workoutLogs/{logId} {
-        allow read, create: if request.auth != null && request.auth.uid == uid;
+        allow read: if request.auth != null && request.auth.uid == uid;
+        allow create: if request.auth != null && request.auth.uid == uid
+          && request.resource.data.completionType in ["full", "partial", "skipped"]
+          && request.resource.data.exercises is list
+          && request.resource.data.completedAt is string;
       }
       match /programModifications/{modId} {
         allow read, create: if request.auth != null && request.auth.uid == uid;
@@ -37,6 +41,15 @@ service cloud.firestore {
       match /settings/{docId} {
         allow read, write: if request.auth != null && request.auth.uid == uid;
       }
+      // Daily Gemini message counter — enforce max 100 msgs/day server-side
+      match /rateLimits/{dateStr} {
+        allow read: if request.auth != null && request.auth.uid == uid;
+        allow create: if request.auth != null && request.auth.uid == uid
+          && request.resource.data.count == 1;
+        allow update: if request.auth != null && request.auth.uid == uid
+          && request.resource.data.count == resource.data.count + 1
+          && request.resource.data.count <= 100;
+      }
     }
 
     // --- Challenges: anyone can read, creator can update, anyone can increment/decrement participantCount ---
@@ -48,16 +61,23 @@ service cloud.firestore {
         && (resource.data.createdBy == request.auth.uid
             || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(["participantCount", "updatedAt"])
                 && (request.resource.data.participantCount == resource.data.participantCount + 1
-                    || request.resource.data.participantCount == resource.data.participantCount - 1)));
+                    || (request.resource.data.participantCount == resource.data.participantCount - 1
+                        && request.resource.data.participantCount >= 0))));
 
-      // Participants manage their own docs
+      // Participants manage their own docs — progress capped at 100, must be non-negative
       match /participants/{uid} {
         allow read: if request.auth != null;
-        allow create, update, delete: if request.auth != null && request.auth.uid == uid;
+        allow create: if request.auth != null && request.auth.uid == uid
+          && request.resource.data.progress >= 0
+          && request.resource.data.progress <= 100;
+        allow update: if request.auth != null && request.auth.uid == uid
+          && request.resource.data.progress >= 0
+          && request.resource.data.progress <= 100;
+        allow delete: if request.auth != null && request.auth.uid == uid;
       }
     }
 
-    // --- Squads: anyone can read, only creator can update ---
+    // --- Squads: anyone can read, creator can update/delete ---
     match /squads/{squadId} {
       allow read: if request.auth != null;
       allow create: if request.auth != null
@@ -67,7 +87,9 @@ service cloud.firestore {
         && (resource.data.createdBy == request.auth.uid
             || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(["memberCount", "updatedAt"])
                 && (request.resource.data.memberCount == resource.data.memberCount + 1
-                    || request.resource.data.memberCount == resource.data.memberCount - 1)));
+                    || (request.resource.data.memberCount == resource.data.memberCount - 1
+                        && request.resource.data.memberCount >= 0))));
+      allow delete: if request.auth != null && resource.data.createdBy == request.auth.uid;
 
       match /members/{uid} {
         allow read: if request.auth != null;

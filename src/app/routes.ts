@@ -7,25 +7,27 @@ import RedirectHandler from "./components/RedirectHandler";
 import LandingGate from "./components/LandingGate";
 import OnboardingLayout from "./components/onboarding/OnboardingLayout";
 import OnboardingGuard from "./components/onboarding/OnboardingGuard";
-import Splashscreen from "./components/onboarding/Splashscreen";
-import Welcome from "./components/onboarding/Welcome";
-import Verify from "./components/onboarding/Verify";
-import BetaCode from "./components/onboarding/BetaCode";
-import CreateProfile from "./components/onboarding/CreateProfile";
-import Step1BodyProfile from "./components/onboarding/personalization/Step1BodyProfile";
-import Step2Optimization from "./components/onboarding/personalization/Step2Optimization";
-import Step3Height from "./components/onboarding/personalization/Step3Height";
-import Step4Weight from "./components/onboarding/personalization/Step4Weight";
-import Step5GoalWeight from "./components/onboarding/personalization/Step5GoalWeight";
-import Step6Constraints from "./components/onboarding/personalization/Step6Constraints";
-import Step7SessionTime from "./components/onboarding/personalization/Step7SessionTime";
-import Step8Experience from "./components/onboarding/personalization/Step8Experience";
-import Step9TrainingFocuses from "./components/onboarding/personalization/Step9TrainingFocuses";
-import Step10GymAccess from "./components/onboarding/personalization/Step10GymAccess";
-import SportSelection from "./components/onboarding/personalization/SportSelection";
-import EquipmentAccess from "./components/onboarding/personalization/EquipmentAccess";
-import AgentSelection from "./components/onboarding/personalization/AgentSelection";
-import ProgramForging from "./components/onboarding/ProgramForging";
+
+// Lazy-loaded onboarding screens (code splitting)
+const Splashscreen = lazy(() => import("./components/onboarding/Splashscreen"));
+const Welcome = lazy(() => import("./components/onboarding/Welcome"));
+const Verify = lazy(() => import("./components/onboarding/Verify"));
+const BetaCode = lazy(() => import("./components/onboarding/BetaCode"));
+const CreateProfile = lazy(() => import("./components/onboarding/CreateProfile"));
+const Step1BodyProfile = lazy(() => import("./components/onboarding/personalization/Step1BodyProfile"));
+const Step2Optimization = lazy(() => import("./components/onboarding/personalization/Step2Optimization"));
+const Step3Height = lazy(() => import("./components/onboarding/personalization/Step3Height"));
+const Step4Weight = lazy(() => import("./components/onboarding/personalization/Step4Weight"));
+const Step5GoalWeight = lazy(() => import("./components/onboarding/personalization/Step5GoalWeight"));
+const Step6Constraints = lazy(() => import("./components/onboarding/personalization/Step6Constraints"));
+const Step7SessionTime = lazy(() => import("./components/onboarding/personalization/Step7SessionTime"));
+const Step8Experience = lazy(() => import("./components/onboarding/personalization/Step8Experience"));
+const Step9TrainingFocuses = lazy(() => import("./components/onboarding/personalization/Step9TrainingFocuses"));
+const Step10GymAccess = lazy(() => import("./components/onboarding/personalization/Step10GymAccess"));
+const SportSelection = lazy(() => import("./components/onboarding/personalization/SportSelection"));
+const EquipmentAccess = lazy(() => import("./components/onboarding/personalization/EquipmentAccess"));
+const AgentSelection = lazy(() => import("./components/onboarding/personalization/AgentSelection"));
+const ProgramForging = lazy(() => import("./components/onboarding/ProgramForging"));
 
 // Lazy-loaded app screens (code splitting)
 const Dashboard = lazy(() => import("./components/Dashboard"));
@@ -35,6 +37,7 @@ const Challenges = lazy(() => import("./components/Challenges"));
 const ChallengeDetail = lazy(() => import("./components/ChallengeDetail"));
 const AIAgent = lazy(() => import("./components/AIAgent"));
 const Notifications = lazy(() => import("./components/Notifications"));
+const NotFound = lazy(() => import("./components/NotFound"));
 
 /** Wrap a lazy component in Suspense with the LoadingSkeleton fallback */
 function withSuspense(LazyComponent: React.LazyExoticComponent<React.ComponentType>) {
@@ -59,30 +62,30 @@ export const router = createBrowserRouter([
         Component: OnboardingLayout,
         children: [
           // Public routes — no auth required
-          { index: true, Component: Splashscreen },
-          { path: "welcome", Component: Welcome },
-          { path: "verify", Component: Verify },
+          { index: true, Component: withSuspense(Splashscreen) },
+          { path: "welcome", Component: withSuspense(Welcome) },
+          { path: "verify", Component: withSuspense(Verify) },
 
           // Auth-gated onboarding routes — must be signed in
           {
             Component: OnboardingGuard,
             children: [
-              { path: "beta", Component: BetaCode },
-              { path: "profile", Component: CreateProfile },
-              { path: "personalize/1", Component: Step1BodyProfile },
-              { path: "personalize/2", Component: Step2Optimization },
-              { path: "personalize/3", Component: Step3Height },
-              { path: "personalize/4", Component: Step4Weight },
-              { path: "personalize/5", Component: Step5GoalWeight },
-              { path: "personalize/6", Component: Step6Constraints },
-              { path: "personalize/7", Component: Step7SessionTime },
-              { path: "personalize/8", Component: Step8Experience },
-              { path: "personalize/9", Component: Step9TrainingFocuses },
-              { path: "personalize/sport", Component: SportSelection },
-              { path: "personalize/equipment", Component: EquipmentAccess },
-              { path: "personalize/gym", Component: Step10GymAccess },
-              { path: "personalize/agent", Component: AgentSelection },
-              { path: "personalize/forging", Component: ProgramForging },
+              { path: "beta", Component: withSuspense(BetaCode) },
+              { path: "profile", Component: withSuspense(CreateProfile) },
+              { path: "personalize/1", Component: withSuspense(Step1BodyProfile) },
+              { path: "personalize/2", Component: withSuspense(Step2Optimization) },
+              { path: "personalize/3", Component: withSuspense(Step3Height) },
+              { path: "personalize/4", Component: withSuspense(Step4Weight) },
+              { path: "personalize/5", Component: withSuspense(Step5GoalWeight) },
+              { path: "personalize/6", Component: withSuspense(Step6Constraints) },
+              { path: "personalize/7", Component: withSuspense(Step7SessionTime) },
+              { path: "personalize/8", Component: withSuspense(Step8Experience) },
+              { path: "personalize/9", Component: withSuspense(Step9TrainingFocuses) },
+              { path: "personalize/sport", Component: withSuspense(SportSelection) },
+              { path: "personalize/equipment", Component: withSuspense(EquipmentAccess) },
+              { path: "personalize/gym", Component: withSuspense(Step10GymAccess) },
+              { path: "personalize/agent", Component: withSuspense(AgentSelection) },
+              { path: "personalize/forging", Component: withSuspense(ProgramForging) },
             ],
           },
         ],
@@ -105,6 +108,11 @@ export const router = createBrowserRouter([
             ],
           },
         ],
+      },
+      // 404 catch-all
+      {
+        path: "*",
+        Component: withSuspense(NotFound),
       },
     ],
   },

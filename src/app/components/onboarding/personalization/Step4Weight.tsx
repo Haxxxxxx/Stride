@@ -7,8 +7,19 @@ export default function Step4Weight() {
   const store = useOnboardingStore();
   const { weight, setWeight, optimizationGoal } = store;
 
+  const handleUnitSwitch = (unit: "kg" | "lb") => {
+    if (unit === weight.unit) return;
+    const num = parseFloat(weight.value);
+    if (!isNaN(num) && num > 0) {
+      const converted = unit === "lb" ? Math.round(num * 2.205) : Math.round(num / 2.205);
+      setWeight({ value: converted.toString(), unit });
+    } else {
+      setWeight({ value: "", unit });
+    }
+  };
+
   const handleContinue = () => {
-    if (weight.value) {
+    if (weight.value && parseFloat(weight.value) > 0) {
       if (optimizationGoal === 'fat-loss') {
         navigate('/onboarding/personalize/5');
       } else {
@@ -23,13 +34,13 @@ export default function Step4Weight() {
       totalSteps={getTotalSteps(store)}
       title="Select Weight"
       onContinue={handleContinue}
-      canContinue={!!weight.value}
+      canContinue={!!weight.value && parseFloat(weight.value) > 0}
     >
       <div className="flex flex-col items-center gap-12">
         {/* Unit Toggle */}
         <div className="bg-white/10 border border-white/20 p-1 flex gap-1">
           <button
-            onClick={() => setWeight({ ...weight, unit: "lb" })}
+            onClick={() => handleUnitSwitch("lb")}
             className={`px-6 py-2 font-['JetBrains_Mono',monospace] text-[9px] uppercase tracking-wider transition-colors ${
               weight.unit === "lb"
                 ? "bg-white/20 text-white"
@@ -39,7 +50,7 @@ export default function Step4Weight() {
             Pound
           </button>
           <button
-            onClick={() => setWeight({ ...weight, unit: "kg" })}
+            onClick={() => handleUnitSwitch("kg")}
             className={`px-6 py-2 font-['JetBrains_Mono',monospace] text-[9px] uppercase tracking-wider transition-colors ${
               weight.unit === "kg"
                 ? "bg-[#ff6600] text-black"
@@ -55,6 +66,7 @@ export default function Step4Weight() {
           <div className="border-2 border-white/40 bg-white/5 px-6 py-4">
             <input
               type="number"
+              inputMode="decimal"
               step="0.1"
               value={weight.value}
               onChange={(e) => setWeight({ ...weight, value: e.target.value })}

@@ -62,7 +62,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (u) {
         u.getIdToken()
           .then(() => syncFromFirestore(u.uid))
-          .catch(console.warn);
+          .catch(() => {
+            // Retry after App Check / auth token settles
+            setTimeout(() => syncFromFirestore(u.uid).catch(console.warn), 2000);
+          });
       }
 
       if (redirectDone) {

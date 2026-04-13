@@ -19,22 +19,18 @@ import {
 } from "firebase/firestore";
 import { db, auth, appCheck } from "./firebase";
 
-// Cache the App Check token promise so we only wait once
-let appCheckReady: Promise<void> | null = null;
+// Resolved once App Check has a valid token (or gave up trying)
+const appCheckReady: Promise<void> = appCheck
+  ? import("firebase/app-check").then(({ getToken }) =>
+      getToken(appCheck!, false).then(() => {})
+    ).catch(() => {})
+  : Promise.resolve();
 
 /**
  * Wait for Firebase Auth + App Check to be ready before Firestore operations.
- * App Check enforcement rejects requests that arrive before the token exchange completes.
  */
 async function ensureAuthReady(): Promise<void> {
-  // Wait for App Check token (once) — required when enforcement is enabled
-  if (appCheck && !appCheckReady) {
-    appCheckReady = import("firebase/app-check")
-      .then(({ getToken }) => getToken(appCheck!, false))
-      .then(() => {})
-      .catch(() => {}); // non-fatal — let Firestore rules decide
-  }
-  if (appCheckReady) await appCheckReady;
+  await appCheckReady;
 
   if (auth.currentUser) {
     await auth.currentUser.getIdToken();

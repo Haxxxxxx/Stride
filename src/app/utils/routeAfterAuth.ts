@@ -30,10 +30,12 @@ export async function routeAfterAuth(uid: string, navigate: NavigateFunction): P
       userDoc = await attempt();
     } catch (err: unknown) {
       const code = (err as { code?: string }).code ?? "";
-      // Firestore hasn't received the auth token yet — retry after a brief settle
+      // Firestore/App Check may need time to settle — retry with backoff
       if (code === "permission-denied" || String(err).includes("permissions")) {
-        await new Promise((r) => setTimeout(r, 800));
-        userDoc = await attempt();
+        for (const delay of [1500, 3000]) {
+          await new Promise((r) => setTimeout(r, delay));
+          try { userDoc = await attempt(); break; } catch { /* continue */ }
+        }
       } else {
         throw err;
       }

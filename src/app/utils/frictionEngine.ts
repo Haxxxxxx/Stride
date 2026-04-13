@@ -3,7 +3,7 @@
 // Delivers calibrated friction responses (10-15% of eligible cases)
 // For agents Atlas, Orion, and Kade
 
-import { getBehaviorState, recordFrictionDelivered } from "./behaviorStore";
+import { getBehaviorState } from "./behaviorStore";
 
 // ============================================================
 // CONTRADICTION DETECTORS
@@ -110,7 +110,7 @@ function checkSafetyBlockers(): boolean {
 }
 
 // Run all detectors
-export function runDetectors(): DetectionResult[] {
+function runDetectors(): DetectionResult[] {
   if (checkSafetyBlockers()) {
     return [{ flag: "SB", severity: null, description: "Safety blocker active. Friction suppressed." }];
   }
@@ -180,15 +180,8 @@ const CM_FRICTION = [
   "Confirm: do you want realism or idealism?",
 ];
 
-const REENTRY_FRICTION = [
-  "No drama. Resume structure.",
-  "You can return without punishment.",
-  "One session restores momentum.",
-  "Begin again -- deliberately.",
-];
-
 // Get friction response for a specific detector flag
-export function getFrictionResponse(flag: DetectorFlag): string {
+function getFrictionResponse(flag: DetectorFlag): string {
   let pool: string[];
 
   switch (flag) {
@@ -209,10 +202,6 @@ export function getFrictionResponse(flag: DetectorFlag): string {
   }
 
   return pool[Math.floor(Math.random() * pool.length)];
-}
-
-export function getReentryMessage(): string {
-  return REENTRY_FRICTION[Math.floor(Math.random() * REENTRY_FRICTION.length)];
 }
 
 // ============================================================
@@ -242,18 +231,29 @@ export function shouldDeliverFriction(): FrictionDecision {
     };
   }
 
-  // Check alignment score
-  const alignmentScore = state.alignmentScore;
-  const hasDetection = detections.some((d) => d.flag !== null && d.flag !== "SB");
-
-  if (alignmentScore >= 75 && !hasDetection) {
+  // Don't deliver friction to users who haven't completed any workouts yet
+  if (state.totalWorkoutsCompleted === 0) {
     return {
       eligible: false,
       flag: null,
       response: "",
       agent: "atlas",
-      reason: "Alignment score above threshold, no detections.",
+      reason: "New user — no friction before first workout.",
     };
+  }
+
+  // High-alignment users: only allow hard-severity detections through
+  if (state.alignmentScore >= 75) {
+    const hasHardDetection = detections.some((d) => d.severity === "hard");
+    if (!hasHardDetection) {
+      return {
+        eligible: false,
+        flag: null,
+        response: "",
+        agent: "atlas",
+        reason: "Alignment score above threshold, no hard detections.",
+      };
+    }
   }
 
   // Rate limiter: Max 1 per 10 agent interactions
@@ -262,7 +262,6 @@ export function shouldDeliverFriction(): FrictionDecision {
     state.frictionCountInSession > 0 &&
     state.totalAgentInteractions % 10 !== 0
   ) {
-    // Only deliver every ~10th interaction (10-15% rate)
     const rate = state.frictionCountInSession / Math.max(state.totalAgentInteractions, 1);
     if (rate > 0.15) {
       return {
@@ -275,15 +274,15 @@ export function shouldDeliverFriction(): FrictionDecision {
     }
   }
 
-  // Max 1 friction per 24 hours
+  // Max 1 friction per 4 hours (allows ~2-3 per day for active users)
   const hoursSinceLastFriction = (Date.now() - state.lastFrictionTimestamp) / (1000 * 60 * 60);
-  if (state.lastFrictionTimestamp > 0 && hoursSinceLastFriction < 24) {
+  if (state.lastFrictionTimestamp > 0 && hoursSinceLastFriction < 4) {
     return {
       eligible: false,
       flag: null,
       response: "",
       agent: "atlas",
-      reason: "Rate limit: less than 24 hours since last friction.",
+      reason: "Rate limit: less than 4 hours since last friction.",
     };
   }
 
@@ -315,9 +314,6 @@ export function shouldDeliverFriction(): FrictionDecision {
 
   // Route to appropriate agent
   const agent = routeToAgent(primaryDetection.flag);
-
-  // Record the friction delivery
-  recordFrictionDelivered();
 
   return {
     eligible: true,

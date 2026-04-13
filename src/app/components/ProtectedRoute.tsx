@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Navigate, Outlet } from "react-router";
 import { useAuth } from "../contexts/AuthContext";
-import { getDocumentFresh } from "../../services/firestore";
+import { getDocument } from "../../services/firestore";
 
 export default function ProtectedRoute() {
   const { user, loading } = useAuth();
@@ -19,7 +19,7 @@ export default function ProtectedRoute() {
     if (!user) return;
     let cancelled = false;
 
-    getDocumentFresh<{ onboardingComplete?: boolean; betaValidated?: boolean }>(`users/${user.uid}`)
+    getDocument<{ onboardingComplete?: boolean; betaValidated?: boolean }>(`users/${user.uid}`)
       .then((doc) => {
         if (cancelled) return;
         setOnboardingComplete(doc?.onboardingComplete === true);
