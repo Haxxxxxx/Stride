@@ -2,12 +2,12 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import svgPaths from "../../imports/svg-2gts8wf65t";
 import { CircularProgress } from "./CircularProgress";
-import { WorkoutSequenceModal, loadAnyWIP, type WorkoutWIP } from "./WorkoutSequenceModal";
+import { WorkoutSequenceModal, loadAnyWIP, loadRegularWIP, loadBonusWIP, type WorkoutWIP } from "./WorkoutSequenceModal";
 import { SystemMessage } from "./SystemMessage";
 import { getRandomMessage, getStreakMilestoneMessage } from "../utils/microLanguage";
 import { getBehaviorState, recordLogin, checkMissedWorkout } from "../utils/behaviorStore";
 import { useAuth } from "../contexts/AuthContext";
-import { subscribeToDocument, subscribeToCollection, updateDocument, where, orderBy, limit } from "../../services/firestore";
+import { subscribeToDocument, subscribeToCollection, updateDocument, queryCollection, where, orderBy, limit, getDocument } from "../../services/firestore";
 import type { Program, WorkoutDay, Exercise } from "../../services/programGenerator";
 import { toLocalDateStr, getMondayOf, getTodayDayIndex, getCurrentProgramWeek, isProgramExpired } from "../utils/dateUtils";
 import { SkeletonBlock } from "./LoadingSkeleton";
@@ -337,15 +337,21 @@ const quickWorkoutOptions: { category: string; workout: WorkoutDay }[] = [
   },
 ];
 
-function ActiveOperation({ onOpenModal, onResume, onResumeBonusWip, onQuickWorkout, todayWorkout, todayCompleted, todayLog, isRestDay, wip, bonusWip, generatingQuick, showQuickMenu, setShowQuickMenu }: { onOpenModal: () => void; onResume: () => void; onResumeBonusWip: () => void; onQuickWorkout: (day: WorkoutDay) => void; todayWorkout: WorkoutDay | null; todayCompleted: boolean; todayLog: DashboardWorkoutLog | null; isRestDay: boolean; wip: WorkoutWIP | null; bonusWip: WorkoutWIP | null; generatingQuick: boolean; showQuickMenu: boolean; setShowQuickMenu: (v: boolean) => void }) {
+function ActiveOperation({ onOpenModal, onResume, onResumeBonusWip, onQuickWorkout, todayWorkout, todayCompleted, todayLog, isRestDay, wip, bonusWip, generatingQuick, showQuickMenu, setShowQuickMenu, earnedRest = true, weeklyTarget = 0, weeklyCompleted = 0 }: { onOpenModal: () => void; onResume: () => void; onResumeBonusWip: () => void; onQuickWorkout: (day: WorkoutDay) => void; todayWorkout: WorkoutDay | null; todayCompleted: boolean; todayLog: DashboardWorkoutLog | null; isRestDay: boolean; wip: WorkoutWIP | null; bonusWip: WorkoutWIP | null; generatingQuick: boolean; showQuickMenu: boolean; setShowQuickMenu: (v: boolean) => void; earnedRest?: boolean; weeklyTarget?: number; weeklyCompleted?: number }) {
+  // Only show "make-up" framing if this is an actual scheduled rest day AND operator is behind
+  const behind = isRestDay && !earnedRest && weeklyTarget > 0;
+  const behindBy = Math.max(0, Math.min(4, weeklyTarget) - weeklyCompleted);
+
   if (!todayWorkout) {
     return (
       <div className="w-full border border-white/20 bg-black p-5 relative">
         <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white/40 uppercase tracking-[2px] mb-3">
-          {isRestDay ? "Recovery Day" : "Active Protocol"}
+          {behind ? "Make-Up Day" : isRestDay ? "Recovery Day" : "Active Protocol"}
         </div>
         <div className="font-['JetBrains_Mono',monospace] text-[13px] text-white/60 mb-4">
-          {isRestDay
+          {behind
+            ? `Rest isn't earned yet — ${weeklyCompleted}/${Math.min(4, weeklyTarget)} sessions this week. ${behindBy} to go. Finish strong.`
+            : isRestDay
             ? "No scheduled operation today. Recovery is adaptation. Use this time to recharge."
             : "No active program. Complete onboarding to generate your training protocol."}
         </div>
@@ -368,9 +374,9 @@ function ActiveOperation({ onOpenModal, onResume, onResumeBonusWip, onQuickWorko
             <button
               onClick={() => setShowQuickMenu(!showQuickMenu)}
               disabled={generatingQuick}
-              className="w-full border border-[#ff6600] text-[#ff6600] font-['JetBrains_Mono',monospace] text-[10px] font-bold uppercase tracking-wider py-3 hover:bg-[#ff6600]/10 transition-colors disabled:opacity-50"
+              className={`w-full border font-['JetBrains_Mono',monospace] text-[10px] font-bold uppercase tracking-wider py-3 transition-colors disabled:opacity-50 ${behind ? "bg-[#ff6600] text-black border-[#ff6600] hover:bg-[#ff8833]" : "border-[#ff6600] text-[#ff6600] hover:bg-[#ff6600]/10"}`}
             >
-              {showQuickMenu ? "Cancel" : "Optional Bonus Calibration"}
+              {showQuickMenu ? "Cancel" : behind ? "Run Make-Up Session →" : "Optional Bonus Calibration"}
             </button>
           </>
         ) : (
@@ -712,8 +718,14 @@ function CoreCircuit({ activeProgram, currentWeek, todayWorkout, isRestDay, onQu
     setAdding(template.id);
     try {
       const targetDayNum = todayWorkout.dayNumber;
-      const updatedWeeks = activeProgram.weeks.map((w, wi) => {
-        if (wi !== currentWeek - 1) return w;
+      // Read fresh program doc before modifying — React state lags behind
+      // Firestore by at least one round-trip. If the agent just swapped an
+      // exercise in the same window, applying changes against stale state
+      // would clobber that edit. Same pattern the agent actions use.
+      const fresh = await getDocument<Program & { id: string }>(`users/${user.uid}/programs/${activeProgram.id}`);
+      const baseWeeks = fresh?.weeks ?? activeProgram.weeks;
+      const updatedWeeks = baseWeeks.map((w) => {
+        if (w.weekNumber !== currentWeek) return w;
         return {
           ...w,
           days: w.days.map((d) => {
@@ -916,6 +928,24 @@ export default function Dashboard() {
     return unsub;
   }, [user]);
 
+  // Fallback refresh: if the agent just modified the program, force an explicit re-read
+  // in case the snapshot listener hasn't fired yet (seen on slow networks).
+  useEffect(() => {
+    if (!user) return;
+    const onUpdated = async () => {
+      try {
+        const programs = await queryCollection<Program & { id: string }>(
+          `users/${user.uid}/programs`,
+          [where("active", "==", true), limit(1)]
+        );
+        if (programs[0]) setActiveProgram(programs[0]);
+        setRefreshKey(k => k + 1);
+      } catch { /* ignore — subscription will catch up */ }
+    };
+    window.addEventListener("stride:programUpdated", onUpdated);
+    return () => window.removeEventListener("stride:programUpdated", onUpdated);
+  }, [user]);
+
   useEffect(() => {
     // Record login and show login trigger message
     const state = recordLogin();
@@ -978,7 +1008,7 @@ export default function Dashboard() {
   const todayDateStrRef = useRef(todayDateStr);
   todayDateStrRef.current = todayDateStr;
 
-  const { todayLog, todayCompleted, completedExerciseNames, currentWeek, todayWorkout, isRestDay, isSkippedDay, workoutName } = useMemo(() => {
+  const { todayLog, todayCompleted, completedExerciseNames, currentWeek, todayWorkout, isRestDay, isSkippedDay, workoutName, earnedRest, weeklyTarget, weeklyCompleted } = useMemo(() => {
     const log = weekLogs.get(todayDateStr) ?? null;
     const completed = !!log;
     const exNames = new Set(log?.exercises?.map((e) => e.name) ?? []);
@@ -989,10 +1019,23 @@ export default function Dashboard() {
     const raw = rest ? null : (wData?.days?.[todayDayIndex] ?? null);
     const skipped = !!(raw && raw.exercises.length === 0);
     const workout = skipped ? null : raw;
+
+    // Count actual completed training sessions this week (full or partial, excluding skipped/activity)
+    let done = 0;
+    for (const l of weekLogs.values()) {
+      if (l.isActivity) continue;
+      if (l.completionType === "full" || l.completionType === "partial") done++;
+    }
+    // Rest is earned once the operator has completed their weekly training target
+    // (capped at 4 so users on 5+ day splits don't need to hit every single session).
+    const target = totalDays;
+    const earned = target === 0 ? true : done >= Math.min(4, target);
+
     return {
       todayLog: log, todayCompleted: completed, completedExerciseNames: exNames,
       currentWeek: week, todayWorkout: workout, isRestDay: rest || skipped,
       isSkippedDay: skipped, workoutName: workout?.name ?? "Workout",
+      earnedRest: earned, weeklyTarget: target, weeklyCompleted: done,
     };
   }, [weekLogs, todayDateStr, todayDayIndex, activeProgram]);
 
@@ -1014,51 +1057,61 @@ export default function Dashboard() {
   const [wip, setWip] = useState<WorkoutWIP | null>(null);
   const [bonusWip, setBonusWip] = useState<WorkoutWIP | null>(null);
   useEffect(() => {
-    // Single localStorage read — check if WIP matches today's workout or is a bonus
-    const anyWip = loadAnyWIP();
-    if (anyWip?.workoutName === workoutName) {
-      setWip(anyWip);
-      setBonusWip(null);
-    } else {
-      setWip(null);
-      setBonusWip(anyWip); // null if no WIP, or bonus WIP with different name
-    }
+    // Read regular + bonus slots independently — they live in separate keys so
+    // one paused workout can't clobber the other.
+    const regular = loadRegularWIP();
+    const bonus = loadBonusWIP();
+    setWip(regular && regular.workoutName === workoutName ? regular : null);
+    setBonusWip(bonus);
   }, [workoutName, isModalOpen]);
 
   const handleModalClose = () => {
     setIsModalOpen(false);
     window.dispatchEvent(new CustomEvent("stride:workoutModalClose"));
     setShowQuickMenu(false);
-    // Keep quickWorkoutDay if WIP was saved (user can resume), clear otherwise
-    const anyWip = loadAnyWIP();
-    if (!anyWip || anyWip.workoutName !== quickWorkoutDay?.name) {
+    // Keep quickWorkoutDay if a bonus WIP still exists for this workout (user
+    // can resume). Otherwise, clear the bonus state.
+    const bonus = loadBonusWIP();
+    if (!bonus || bonus.workoutName !== quickWorkoutDay?.name) {
       setQuickWorkoutDay(null);
     }
     // Force re-read of behavior state after workout completion
     setRefreshKey(k => k + 1);
   };
 
-  // Open modal and notify floating timer
+  // Open modal and notify floating timer.
+  // NOTE: we do NOT clear stride_bonus_workout here anymore — if the user bails
+  // at the readiness screen without starting, they'd lose the generated workout.
+  // The key is cleared when a workout actually completes or ends early (handled
+  // below in handleModalClose by checking WIP state).
   const openModal = () => {
     setIsModalOpen(true);
-    // Workout is now starting — clear the durable bonus workout from localStorage
-    try { localStorage.removeItem("stride_bonus_workout"); } catch { /* ignore */ }
     window.dispatchEvent(new CustomEvent("stride:workoutModalOpen"));
+  };
+
+  // Shared resume handler — picks the bonus slot first (bonus WIP = quickWorkoutDay),
+  // otherwise falls back to regular WIP (which reopens as today's scheduled workout).
+  const resumeFromWIP = () => {
+    const bonus = loadBonusWIP();
+    if (bonus?.snapshotExercises?.length) {
+      setQuickWorkoutDay({ dayNumber: 0, name: bonus.workoutName, exercises: bonus.snapshotExercises });
+      openModal();
+      return;
+    }
+    const regular = loadRegularWIP();
+    if (regular?.snapshotExercises?.length) {
+      // Regular WIP → open as today's workout (no quickWorkoutDay → isBonus=false)
+      setQuickWorkoutDay(null);
+      openModal();
+    }
   };
 
   // Listen for resume events from the floating mini-timer (same page)
   useEffect(() => {
-    const handleResumeEvent = () => {
-      const anyWip = loadAnyWIP();
-      if (!anyWip) return;
-      // Set up the workout day from WIP snapshot so the modal can restore
-      if (anyWip.snapshotExercises && anyWip.snapshotExercises.length > 0) {
-        setQuickWorkoutDay({ dayNumber: 0, name: anyWip.workoutName, exercises: anyWip.snapshotExercises });
-      }
-      openModal();
-    };
-    window.addEventListener("stride:resumeWorkout", handleResumeEvent);
-    return () => window.removeEventListener("stride:resumeWorkout", handleResumeEvent);
+    window.addEventListener("stride:resumeWorkout", resumeFromWIP);
+    return () => window.removeEventListener("stride:resumeWorkout", resumeFromWIP);
+    // resumeFromWIP closes over setQuickWorkoutDay/openModal which are stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Handle navigation from floating timer on other pages (location.state.resumeWorkout)
@@ -1066,14 +1119,9 @@ export default function Dashboard() {
     if (location.state?.resumeWorkout) {
       // Clear React Router's in-memory state to prevent re-triggering on re-render
       navigate("/app", { replace: true, state: {} });
-      const anyWip = loadAnyWIP();
-      if (anyWip) {
-        if (anyWip.snapshotExercises && anyWip.snapshotExercises.length > 0) {
-          setQuickWorkoutDay({ dayNumber: 0, name: anyWip.workoutName, exercises: anyWip.snapshotExercises });
-        }
-        openModal();
-      }
+      resumeFromWIP();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.state, navigate]);
 
   /** Resume a partial workout — open modal with only the remaining exercises */
@@ -1158,13 +1206,14 @@ export default function Dashboard() {
   };
 
   // Reorder exercises in today's workout and persist to Firestore
-  const handleReorderExercises = (reordered: Exercise[]) => {
+  const handleReorderExercises = async (reordered: Exercise[]) => {
     if (!user || !activeProgram?.id || !todayWorkout) return;
     const targetDayNum = todayWorkout.dayNumber;
+    const programId = activeProgram.id;
 
-    // Update local state immediately
-    const updatedWeeks = activeProgram.weeks.map((w, wi) => {
-      if (wi !== currentWeek - 1) return w;
+    // Optimistic local update for instant feel
+    const optimistic = activeProgram.weeks.map((w) => {
+      if (w.weekNumber !== currentWeek) return w;
       return {
         ...w,
         days: w.days.map((d) => {
@@ -1173,12 +1222,27 @@ export default function Dashboard() {
         }),
       };
     });
-    setActiveProgram({ ...activeProgram, weeks: updatedWeeks });
+    setActiveProgram({ ...activeProgram, weeks: optimistic });
 
-    // Persist to Firestore
-    updateDocument(`users/${user.uid}/programs/${activeProgram.id}`, {
-      weeks: updatedWeeks,
-    }).catch(console.warn);
+    // Persist — but rebuild against a fresh fetch so we don't clobber a
+    // concurrent agent modification elsewhere in the program.
+    try {
+      const fresh = await getDocument<Program & { id: string }>(`users/${user.uid}/programs/${programId}`);
+      const baseWeeks = fresh?.weeks ?? activeProgram.weeks;
+      const updatedWeeks = baseWeeks.map((w) => {
+        if (w.weekNumber !== currentWeek) return w;
+        return {
+          ...w,
+          days: w.days.map((d) => {
+            if (d.dayNumber !== targetDayNum) return d;
+            return { ...d, exercises: reordered };
+          }),
+        };
+      });
+      await updateDocument(`users/${user.uid}/programs/${programId}`, { weeks: updatedWeeks });
+    } catch (err) {
+      console.warn("[Dashboard] Reorder persist failed:", err);
+    }
   };
 
   if (!programLoaded) {
@@ -1271,7 +1335,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      <ActiveOperation onOpenModal={() => openModal()} onResume={handleResume} onResumeBonusWip={handleResumeBonusWip} onQuickWorkout={handleQuickWorkout} todayWorkout={quickWorkoutDay || todayWorkout} todayCompleted={todayCompleted && !quickWorkoutDay} todayLog={todayLog} isRestDay={(isRestDay || isSkippedDay) && !quickWorkoutDay} wip={quickWorkoutDay ? bonusWip : wip} bonusWip={bonusWip} generatingQuick={generatingQuick} showQuickMenu={showQuickMenu} setShowQuickMenu={setShowQuickMenu} />
+      <ActiveOperation onOpenModal={() => openModal()} onResume={handleResume} onResumeBonusWip={handleResumeBonusWip} onQuickWorkout={handleQuickWorkout} todayWorkout={quickWorkoutDay || todayWorkout} todayCompleted={todayCompleted && !quickWorkoutDay} todayLog={todayLog} isRestDay={(isRestDay || isSkippedDay) && !quickWorkoutDay} wip={quickWorkoutDay ? bonusWip : wip} bonusWip={bonusWip} generatingQuick={generatingQuick} showQuickMenu={showQuickMenu} setShowQuickMenu={setShowQuickMenu} earnedRest={earnedRest} weeklyTarget={weeklyTarget} weeklyCompleted={weeklyCompleted} />
       <OperationsList todayWorkout={quickWorkoutDay || todayWorkout} todayCompleted={todayCompleted && !quickWorkoutDay} completedExerciseNames={completedExerciseNames} wip={quickWorkoutDay ? bonusWip : wip} onReorder={quickWorkoutDay ? handleReorderBonusExercises : handleReorderExercises} />
 
       {/* Core Circuit Add-on */}
@@ -1321,7 +1385,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      <WorkoutSequenceModal isOpen={isModalOpen} onClose={handleModalClose} workoutDay={quickWorkoutDay || todayWorkout} />
+      <WorkoutSequenceModal isOpen={isModalOpen} onClose={handleModalClose} workoutDay={quickWorkoutDay || todayWorkout} isBonus={!!quickWorkoutDay} />
     </div>
   );
 }

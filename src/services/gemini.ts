@@ -32,7 +32,12 @@ const MODEL = "gemini-2.5-flash";
 const agentTools: FunctionDeclaration[] = [
   {
     name: "getActiveProgram",
-    description: "Fetch operator's active training program.",
+    description: "Fetch the operator's FULL multi-week training program (every week, every day). Use only when the user asks to see the whole program — e.g. 'show my program', 'what's my protocol', 'full schedule'. For 'today's workout' / 'current day' requests, call getTodayWorkout instead.",
+    parameters: { type: SchemaType.OBJECT, properties: {} } as ObjectSchemaRequest,
+  },
+  {
+    name: "getTodayWorkout",
+    description: "Fetch ONLY today's scheduled workout (current week, current day). Use whenever the user asks about today specifically — e.g. 'what's today's workout', 'bring up today's protocol', 'show today', 'what am I doing today', 'current day'. Preferred over getActiveProgram for single-day requests so the UI can render a compact day card.",
     parameters: { type: SchemaType.OBJECT, properties: {} } as ObjectSchemaRequest,
   },
   {
@@ -243,6 +248,10 @@ const TOOL_PATTERNS = [
   /\b(how('s| is))\s+my\s+\w+\s+(progress|trending|doing)\b/i,                     // how's my bench progressing
   /\bshow\s+(my\s+)?(progress|performance|history|stats)\b/i,                       // show my progress
   /\b(what('s| is))\s+my\s+(program|protocol|schedule)\b/i,                         // what's my program
+  /\b(what('s| is))\s+(today('s)?|my\s+today('s)?)\s+(workout|protocol|session|program|schedule|calibration|module)\b/i, // what's today's workout
+  /\b(show|view|display|bring\s+up|load|pull\s+up|give\s+me)\s+(me\s+)?(today('s)?|my\s+)?(workout|protocol|session|module|calibration)\b/i, // show today's workout / bring up my workout
+  /\b(today('s)?|current)\s+(workout|protocol|session|module|calibration|day)\b/i,   // today's protocol / current day
+  /\bmy\s+(workout|protocol|session|module|calibration)\s+(today|for\s+today|right\s+now)\b/i, // my workout today
   /\bbonus\b.*\b(workout|session|calibration)\b/i,                                  // bonus cardio and ab workout/session
   /\b(let'?s|let\s+us)\s+(do|start|try|get|create|make|build)\b.*\b(workout|session|calibration|day)\b/i, // let's do/create a cardio session/day
   /\b(cardio|core|abs?|arms?|legs?|back|chest|shoulders?|upper|lower|full\s*body|hiit|stretching|pull|push)\s+(workout|session|circuit|day)\b/i, // cardio session, arm day, push day

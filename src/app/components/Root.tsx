@@ -34,7 +34,7 @@ function StatusBar() {
   }, []);
 
   return (
-    <div className="bg-black h-[44px] pointer-events-auto w-full border-b border-white/10 relative">
+    <div className="bg-black h-[44px] pointer-events-none w-full border-b border-white/10 relative">
       <Battery />
       <div className="absolute inset-[39.39%_11.64%_35.61%_84.27%]">
         <svg className="block size-full" fill="none" preserveAspectRatio="none" viewBox="0 0 15.333 10.9999">

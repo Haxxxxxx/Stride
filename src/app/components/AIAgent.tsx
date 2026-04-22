@@ -10,7 +10,7 @@ import { useAuth } from "../contexts/AuthContext";
 import { getDocument, setDocument, updateDocument, deleteDocument, queryCollection, subscribeToCollection, where, orderBy, limit, increment } from "../../services/firestore";
 import { createAgentModel, createChatModel, startAgentChat, needsTools, type ChatSession } from "../../services/gemini";
 import { executeAction, AGENT_TOOL_NAMES, type ActionProposal } from "../../services/agentActions";
-import type { Program, Week } from "../../services/programGenerator";
+import type { Program, Week, WorkoutDay } from "../../services/programGenerator";
 import { getTodayDayIndex, getCurrentProgramWeek } from "../utils/dateUtils";
 import type { EnhancedGenerateContentResponse } from "firebase/ai";
 
@@ -241,6 +241,9 @@ export default function AIAgent() {
   const [toolSession, setToolSession] = useState<ChatSession | null>(null);
   const [pendingProposal, setPendingProposal] = useState<ActionProposal | null>(null);
   const [pendingProposalId, setPendingProposalId] = useState<string | null>(null);
+  // Mirror of pendingProposal for synchronous reads (state updates are batched — can't use
+  // the state variable directly inside the same tick that set it).
+  const pendingProposalRef = useRef<ActionProposal | null>(null);
   const [activeProgram, setActiveProgram] = useState<(Program & { id: string }) | null>(null);
   const lastSendRef = useRef(0); // rate limiting
   const firestoreSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -547,10 +550,25 @@ export default function AIAgent() {
       const savedHistory = await loadChatHistory(user.uid);
       initializeGemini(agent, profile, program, recentWorkouts, recentModifications, savedHistory || undefined, userCallsign);
 
-      // If Firestore had newer history, update in-memory messages
-      const localHistory = loadChatHistoryLocal();
-      if (savedHistory && savedHistory !== localHistory && savedHistory.length > 0) {
-        setMessages(savedHistory);
+      // If Firestore had newer history, replace in-memory messages — but only
+      // if we haven't outpaced it locally. The user could have sent a fresh
+      // message between component mount and this async load resolving; blindly
+      // overwriting would lose it. Use functional setMessages so we see the
+      // latest in-memory state.
+      if (savedHistory && savedHistory.length > 0) {
+        setMessages(prev => {
+          // If in-memory already has more messages than the loaded history,
+          // the user has been typing — keep their work.
+          if (prev.length > savedHistory.length) return prev;
+          // If in-memory is only the welcome stubs (< 3 real msgs), replace.
+          // Otherwise compare last-message timestamps/text to detect mid-session writes.
+          const prevLast = prev[prev.length - 1];
+          const savedLast = savedHistory[savedHistory.length - 1];
+          if (prevLast && savedLast && prevLast.text === savedLast.text && prevLast.timestamp === savedLast.timestamp) {
+            return prev; // same tail → no-op
+          }
+          return savedHistory;
+        });
       }
 
       // Only set welcome messages if no history was restored
@@ -728,6 +746,23 @@ export default function AIAgent() {
           },
         };
         setMessages(prev => [...prev, msg]);
+      } else if (normalizedName === "getTodayWorkout" && actionResult.data.found && !actionResult.data.isRestDay && actionResult.data.day) {
+        const day = actionResult.data.day as WorkoutDay;
+        const week: Week = {
+          weekNumber: actionResult.data.weekNumber as number,
+          weekType: actionResult.data.weekType as Week["weekType"],
+          days: [day],
+        };
+        const msg: Message = {
+          type: "ai",
+          text,
+          timestamp: getTimestamp(),
+          programData: {
+            name: actionResult.data.programName as string,
+            weeks: [week],
+          },
+        };
+        setMessages(prev => [...prev, msg]);
       } else if ((normalizedName === "generateBonusWorkout" || normalizedName === "loadDayWorkout") && actionResult.data.bonusWorkout) {
         const bonus = actionResult.data.bonusWorkout as Message["bonusWorkout"];
         // Immediately store so the Dashboard picks it up regardless of how the user navigates back
@@ -746,6 +781,7 @@ export default function AIAgent() {
       // Write action — show proposal for user confirmation
       const proposal = actionResult.proposal;
       const pid = `proposal-${Date.now()}`;
+      pendingProposalRef.current = proposal;
       setPendingProposal(proposal);
       setPendingProposalId(pid);
 
@@ -819,9 +855,30 @@ export default function AIAgent() {
 
     if (functionCalls && functionCalls.length > 0) {
       toolConversationRef.current = true; // stay on tool session for follow-ups
-      // Process all function calls (Gemini may return multiple in one response)
-      for (const fc of functionCalls) {
+      // Process function calls one at a time. If Gemini fans out parallel WRITE
+      // calls (e.g. two removeExercise invocations), only the first can actually
+      // produce a proposal — we must send a rejection for the rest so the tool
+      // session stays in a valid state (every functionCall must get a response).
+      let proposalSeen = false;
+      for (let i = 0; i < functionCalls.length; i++) {
+        const fc = functionCalls[i];
+        if (proposalSeen) {
+          // Acknowledge extra parallel calls with a synthetic failure so Gemini
+          // doesn't deadlock waiting for a response. The user will confirm the
+          // first proposal; subsequent work can be re-requested after that.
+          try {
+            await sendWithRetry(session, [{
+              functionResponse: {
+                name: fc.name,
+                response: { success: false, message: "Queued — apply one modification at a time. Re-issue this after confirming the first." },
+              },
+            }]);
+          } catch { /* best effort */ }
+          continue;
+        }
         await handleFunctionCall(session, fc, 0);
+        // If this call produced a pending proposal, stop — don't stack a second one.
+        if (pendingProposalRef.current) proposalSeen = true;
       }
     } else {
       const text = safeText(response);
@@ -933,9 +990,19 @@ export default function AIAgent() {
     if (!pendingProposal || !toolSession) return;
     setIsThinking(true);
 
+    // Track whether the Firestore write succeeded so we can distinguish
+    // "write actually failed" from "write succeeded but Gemini session errored"
+    let writeSucceeded = false;
+
     try {
       // Execute the Firestore write
       await pendingProposal.execute();
+      writeSucceeded = true;
+
+      // Broadcast program change so Dashboard (and any other listener) can force-sync
+      // immediately — belt-and-suspenders on top of the Firestore real-time subscription,
+      // which can lag on snapshot delivery after a write.
+      window.dispatchEvent(new CustomEvent("stride:programUpdated"));
 
       // Update behavior state for specific actions
       if (pendingProposal.actionName === "skipWorkoutDay") {
@@ -972,7 +1039,7 @@ export default function AIAgent() {
       // Send success back to Gemini so it can confirm in character
       // Use originalName if available (Gemini may have sent snake_case)
       const responseName = pendingProposal.originalName || pendingProposal.actionName;
-      const followUp = await toolSession.sendMessage([{
+      const followUp = await sendWithRetry(toolSession, [{
         functionResponse: {
           name: responseName,
           response: { success: true, message: "Changes applied successfully." },
@@ -1050,24 +1117,54 @@ export default function AIAgent() {
       }
     } catch (err) {
       console.warn("[AIAgent] Confirm action failed:", err);
-      // Send failure response to keep tool session in valid state
-      try {
-        if (toolSession && pendingProposal) {
-          const failName = pendingProposal.originalName || pendingProposal.actionName;
-          await toolSession.sendMessage([{
-            functionResponse: {
-              name: failName,
-              response: { success: false, message: "Execution failed." },
-            },
-          }]);
+      // Send failure response to keep tool session in valid state (only if write failed —
+      // if write already succeeded, Gemini already got a success response above).
+      if (!writeSucceeded) {
+        try {
+          if (toolSession && pendingProposal) {
+            const failName = pendingProposal.originalName || pendingProposal.actionName;
+            await sendWithRetry(toolSession, [{
+              functionResponse: {
+                name: failName,
+                response: { success: false, message: "Execution failed." },
+              },
+            }]);
+          }
+        } catch {
+          // Session is likely poisoned — null it so handleGeminiSend will reinit fresh
+          setToolSession(null);
+          setChatSession(null);
         }
-      } catch { /* best effort recovery */ }
+      } else {
+        // Write succeeded but relay errored — tool session is desynced. Drop it so
+        // the next user message starts clean instead of cascading failures.
+        setToolSession(null);
+        setChatSession(null);
+      }
+      // Be honest about what happened. If the Firestore write went through, the user's
+      // program IS updated — saying "protocol unchanged" would be a lie.
       setMessages(prev => [...prev, {
         type: "system",
-        text: "ACTION FAILED — protocol unchanged",
+        text: writeSucceeded
+          ? "PROTOCOL UPDATED — (agent relay hiccup, changes saved)"
+          : "ACTION FAILED — protocol unchanged",
         timestamp: getTimestamp(),
       }]);
+      // If the write succeeded, reinit sessions with fresh state so subsequent
+      // messages work cleanly instead of retaining the broken session.
+      if (writeSucceeded && userProfile) {
+        try {
+          const programs = await queryCollection<Program & { id: string; active: boolean }>(
+            `users/${user!.uid}/programs`,
+            [where("active", "==", true), limit(1)]
+          );
+          if (programs[0]) {
+            initializeGemini(currentAgent, userProfile, programs[0], recentWorkoutsRef.current, recentModificationsRef.current, messagesRef.current);
+          }
+        } catch { /* best effort */ }
+      }
     } finally {
+      pendingProposalRef.current = null;
       setPendingProposal(null);
       setPendingProposalId(null);
       setIsThinking(false);
@@ -1076,12 +1173,13 @@ export default function AIAgent() {
 
   /** Reject a pending write action proposal */
   const handleRejectAction = async () => {
-    if (!pendingProposal) return;
+    if (!pendingProposal || isThinking) return;
+    setIsThinking(true);
 
     try {
       if (toolSession) {
         const rejectName = pendingProposal.originalName || pendingProposal.actionName;
-        const followUp = await toolSession.sendMessage([{
+        const followUp = await sendWithRetry(toolSession, [{
           functionResponse: {
             name: rejectName,
             response: { success: false, message: "Operator rejected the proposed changes." },
@@ -1093,9 +1191,14 @@ export default function AIAgent() {
     } catch (err) {
       console.warn("[AIAgent] Reject follow-up failed:", err);
       addAgentMessage("Understood. Protocol unchanged.");
+      // Session may be in a bad state — drop it so next message reinits cleanly
+      setToolSession(null);
+      setChatSession(null);
     } finally {
+      pendingProposalRef.current = null;
       setPendingProposal(null);
       setPendingProposalId(null);
+      setIsThinking(false);
     }
   };
 
@@ -1112,6 +1215,7 @@ export default function AIAgent() {
   const confirmAgentChange = () => {
     setCurrentAgent(selectedAgent);
     setShowAgentModal(false);
+    pendingProposalRef.current = null;
     setPendingProposal(null);
     setPendingProposalId(null);
     toolConversationRef.current = false;
@@ -1170,6 +1274,11 @@ export default function AIAgent() {
             <button
               onClick={async () => {
                 const now = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+                // Drop any in-flight proposal — otherwise the send button stays locked.
+                pendingProposalRef.current = null;
+                setPendingProposal(null);
+                setPendingProposalId(null);
+                toolConversationRef.current = false;
                 setMessages([
                   { type: "system", text: "TERMINAL CLEARED — HISTORY PURGED", timestamp: now },
                   { type: "ai", text: getAgentWelcome(currentAgent, callsign), timestamp: now },
@@ -1220,40 +1329,73 @@ export default function AIAgent() {
                   {message.text}
                 </div>
 
-                {/* Program data view */}
-                {message.programData && (
-                  <div className="border-t border-white/10 pt-3 mt-3 space-y-3">
-                    <div className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] uppercase tracking-wider">
-                      → {message.programData.name}
-                    </div>
-                    {message.programData.weeks.map((week) => (
-                      <div key={week.weekNumber}>
-                        <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/50 uppercase tracking-wider mb-1.5">
-                          Week {week.weekNumber}
-                        </div>
-                        {week.days.map((day) => (
-                          <div key={day.dayNumber} className="mb-2 ml-2">
-                            <div className="font-['JetBrains_Mono',monospace] text-[8px] text-[#ff6600]/80 uppercase tracking-wide mb-1">
-                              Day {day.dayNumber} — {day.name}
-                            </div>
-                            <div className="space-y-1">
-                              {day.exercises.map((ex, i) => (
-                                <div key={i} className="flex items-center justify-between text-[8px] border-b border-white/5 pb-0.5">
-                                  <span className="font-['JetBrains_Mono',monospace] text-white/70">
-                                    [{(i + 1).toString().padStart(2, '0')}] {ex.name}
-                                  </span>
-                                  <span className="font-['JetBrains_Mono',monospace] text-white/50">
-                                    {ex.sets}x{ex.reps} • {ex.rest}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
+                {/* Program data view — compact card for single-day, full tree for multi-week */}
+                {message.programData && (() => {
+                  const weeks = message.programData.weeks;
+                  const isSingleDay = weeks.length === 1 && weeks[0].days.length === 1;
+                  if (isSingleDay) {
+                    const day = weeks[0].days[0];
+                    const totalSets = day.exercises.reduce((s, e) => s + e.sets, 0);
+                    return (
+                      <div className="border border-[#ff6600]/40 bg-[#ff6600]/[0.03] mt-3 p-3">
+                        <div className="flex items-baseline justify-between mb-2.5">
+                          <div className="font-['JetBrains_Mono',monospace] text-[11px] text-[#ff6600] font-bold uppercase tracking-wider">
+                            {day.name}
                           </div>
-                        ))}
+                          <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/40 uppercase tracking-wide">
+                            {day.exercises.length} mod · {totalSets} sets
+                          </div>
+                        </div>
+                        <div className="space-y-1.5">
+                          {day.exercises.map((ex, i) => (
+                            <div key={i} className="flex items-start justify-between gap-3 pb-1.5 border-b border-white/5 last:border-b-0 last:pb-0">
+                              <div className="font-['JetBrains_Mono',monospace] text-[10px] text-white font-medium leading-tight flex-1">
+                                {ex.name}
+                              </div>
+                              <div className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] whitespace-nowrap tabular-nums">
+                                {ex.sets}×{ex.reps}
+                                <span className="text-white/40"> · {ex.rest}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                )}
+                    );
+                  }
+                  return (
+                    <div className="border-t border-white/10 pt-3 mt-3 space-y-3">
+                      <div className="font-['JetBrains_Mono',monospace] text-[9px] text-[#ff6600] uppercase tracking-wider">
+                        → {message.programData.name}
+                      </div>
+                      {weeks.map((week) => (
+                        <div key={week.weekNumber}>
+                          <div className="font-['JetBrains_Mono',monospace] text-[8px] text-white/50 uppercase tracking-wider mb-1.5">
+                            Week {week.weekNumber}
+                          </div>
+                          {week.days.map((day) => (
+                            <div key={day.dayNumber} className="mb-2 ml-2">
+                              <div className="font-['JetBrains_Mono',monospace] text-[8px] text-[#ff6600]/80 uppercase tracking-wide mb-1">
+                                Day {day.dayNumber} — {day.name}
+                              </div>
+                              <div className="space-y-1">
+                                {day.exercises.map((ex, i) => (
+                                  <div key={i} className="flex items-center justify-between text-[8px] border-b border-white/5 pb-0.5">
+                                    <span className="font-['JetBrains_Mono',monospace] text-white/70">
+                                      {ex.name}
+                                    </span>
+                                    <span className="font-['JetBrains_Mono',monospace] text-white/50">
+                                      {ex.sets}×{ex.reps} · {ex.rest}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
 
                 {/* Bonus workout preview + start button */}
                 {message.bonusWorkout && (

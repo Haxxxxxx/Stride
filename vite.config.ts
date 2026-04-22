@@ -58,10 +58,16 @@ export default defineConfig({
           'react-vendor': ['react', 'react-dom'],
           // Router — changes less often than app code
           'router': ['react-router'],
-          // Firebase core — needed on every page (auth gate)
-          'firebase-core': ['firebase/app', 'firebase/auth'],
-          // Firebase services — heavier modules, only needed after auth
-          'firebase-services': ['firebase/firestore', 'firebase/storage', 'firebase/ai', 'firebase/functions', 'firebase/app-check'],
+          // Firebase core — needed on every page (auth gate + App Check init)
+          'firebase-core': ['firebase/app', 'firebase/auth', 'firebase/app-check'],
+          // Firestore — needed on most authenticated pages
+          'firebase-firestore': ['firebase/firestore'],
+          // AI — only used by AIAgent + program generation (deferred)
+          'firebase-ai': ['firebase/ai'],
+          // Storage — only used for avatar upload (Profile + CreateProfile)
+          'firebase-storage': ['firebase/storage'],
+          // Functions — only used at auth boundaries (sendSignInEmail, walletSignIn, validateBetaCode)
+          'firebase-functions': ['firebase/functions'],
           // Solana — isolated to lazy-loaded WalletConnectButton
           'solana': ['@solana/web3.js', '@solana/wallet-adapter-base', '@solana/wallet-adapter-react'],
           // State + utilities

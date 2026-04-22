@@ -5,12 +5,11 @@ import {
   type Challenge,
   type ChallengeParticipant,
   getChallenge,
-  getChallengeParticipants,
   leaveChallenge,
   daysRemaining,
   syncParticipantProfile,
 } from "../../services/challenges";
-import { getDocument } from "../../services/firestore";
+import { getDocument, subscribeToCollection, orderBy } from "../../services/firestore";
 import { getBehaviorState } from "../utils/behaviorStore";
 import { Scanline } from "./Scanline";
 import UserProfileModal, { type ProfileModalUser } from "./UserProfileModal";
@@ -58,29 +57,31 @@ export default function ChallengeDetail() {
   useEffect(() => {
     if (!id) return;
 
-    async function load() {
-      try {
-        const [c, p] = await Promise.all([getChallenge(id!), getChallengeParticipants(id!)]);
-        setChallenge(c);
-        setParticipants(p);
+    // One-shot fetch for the challenge doc itself (rarely changes after creation)
+    getChallenge(id).then((c) => setChallenge(c)).catch((err) => console.warn(err));
 
-        // Sync current user's avatar/callsign then re-fetch participants so UI is fresh
-        if (user) {
-          const profile = await getDocument<{ callsign?: string; avatarUrl?: string }>(`users/${user.uid}`);
+    // Sync current user's avatar/callsign on mount so the participant doc is fresh
+    if (user) {
+      getDocument<{ callsign?: string; avatarUrl?: string }>(`users/${user.uid}`)
+        .then((profile) => {
           if (profile) {
-            await syncParticipantProfile(user.uid, profile.callsign ?? "", profile.avatarUrl ?? "");
-            const updated = await getChallengeParticipants(id!);
-            setParticipants(updated);
+            return syncParticipantProfile(user.uid, profile.callsign ?? "", profile.avatarUrl ?? "");
           }
-        }
-      } catch (err) {
-        console.warn(err);
-      } finally {
-        setLoading(false);
-      }
+        })
+        .catch(() => {});
     }
 
-    load();
+    // Real-time subscription on participants — leaderboard reranks live as
+    // other operators log workouts and their progress updates.
+    const unsub = subscribeToCollection<ChallengeParticipant>(
+      `challenges/${id}/participants`,
+      [orderBy("progress", "desc")],
+      (docs) => {
+        setParticipants(docs);
+        setLoading(false);
+      }
+    );
+    return unsub;
   }, [id, user]);
 
   if (loading) {

@@ -185,15 +185,27 @@ export const sendSignInEmail = onCall(
       throw new HttpsError("invalid-argument", "Invalid redirect URL.");
     }
 
-    // Rate limit: 1 email per 60s per address
+    // Rate limit: 1 email per 60s per address.
+    // Done atomically in a transaction: check timestamp AND claim the slot in
+    // one commit. Without this, two rapid requests could both read "no recent
+    // send", both pass the check, and both deliver an email before either
+    // wrote the rate limit doc.
     const firestore = admin.firestore();
     const rateLimitRef = firestore.doc(`_rateLimit/email_${email.toLowerCase()}`);
-    const rateLimitSnap = await rateLimitRef.get();
-    if (rateLimitSnap.exists) {
-      const lastSent = rateLimitSnap.data()?.timestamp?.toMillis?.() ?? 0;
-      if (Date.now() - lastSent < 60_000) {
-        throw new HttpsError("resource-exhausted", "Please wait before requesting another email.");
-      }
+    try {
+      await firestore.runTransaction(async (tx) => {
+        const snap = await tx.get(rateLimitRef);
+        if (snap.exists) {
+          const lastSent = snap.data()?.timestamp?.toMillis?.() ?? 0;
+          if (Date.now() - lastSent < 60_000) {
+            throw new HttpsError("resource-exhausted", "Please wait before requesting another email.");
+          }
+        }
+        tx.set(rateLimitRef, { timestamp: admin.firestore.FieldValue.serverTimestamp() });
+      });
+    } catch (err) {
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", "Rate limit check failed.");
     }
 
     // Generate the sign-in link via Admin SDK
@@ -312,9 +324,7 @@ If you didn't request access, ignore this message.`;
       throw new HttpsError("internal", "Failed to send email.");
     }
 
-    // Update rate limit
-    await rateLimitRef.set({ timestamp: admin.firestore.FieldValue.serverTimestamp() });
-
+    // Rate limit already claimed atomically above — no need to re-write here.
     return { success: true };
   }
 );

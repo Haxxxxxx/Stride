@@ -95,7 +95,10 @@ export async function logOut() {
     "stride_chat_history",
     "stride_miss_check_lock",
     "stride_workout_wip",
+    "stride_workout_wip_bonus",
     "stride_bonus_workout",
+    "stride_agent_prompt",
+    "stride_dismissed_expiry",
     "emailForSignIn",
   ];
   for (const key of strideKeys) {

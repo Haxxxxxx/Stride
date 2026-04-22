@@ -19,13 +19,13 @@ export async function routeAfterAuth(uid: string, navigate: NavigateFunction): P
       await auth.currentUser.getIdToken(true);
     }
     await ensureUserDoc(uid);
-    return getDocumentFresh<{ onboardingComplete?: boolean; betaValidated?: boolean }>(
+    return getDocumentFresh<{ onboardingComplete?: boolean; betaValidated?: boolean; callsign?: string }>(
       `users/${uid}`
     );
   };
 
   try {
-    let userDoc: { onboardingComplete?: boolean; betaValidated?: boolean } | null;
+    let userDoc: { onboardingComplete?: boolean; betaValidated?: boolean; callsign?: string } | null = null;
     try {
       userDoc = await attempt();
     } catch (err: unknown) {
@@ -46,7 +46,14 @@ export async function routeAfterAuth(uid: string, navigate: NavigateFunction): P
       return;
     }
     if (userDoc?.betaValidated) {
-      navigate("/onboarding/profile", { replace: true });
+      // Skip profile step if user already set a callsign (they bailed mid-onboarding
+      // after profile creation but before completion). Sends them back into the
+      // personalization flow rather than forcing them to redo their profile.
+      if (userDoc.callsign && userDoc.callsign.trim().length > 0) {
+        navigate("/onboarding/personalize/1", { replace: true });
+      } else {
+        navigate("/onboarding/profile", { replace: true });
+      }
       return;
     }
   } catch (err) {

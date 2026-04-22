@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { resizeAvatar } from "../../utils/avatarResize";
 import imgRectangle7 from "figma:asset/d2dc082de376809efe9160821f9df7f46005e136.webp";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { useAuth } from "../../contexts/AuthContext";
@@ -36,11 +37,19 @@ export default function CreateProfile() {
     try {
       let avatarUrl: string | null = null;
 
-      // Upload avatar to Firebase Storage if selected
+      // Upload avatar to Firebase Storage if selected. Resize first so a
+      // multi-megabyte photo doesn't blow past Storage's 5MB limit and fail
+      // the onboarding hand-off to personalization.
       if (user && avatarFileRef.current) {
-        const storageRef = ref(storage, `avatars/${user.uid}`);
-        await uploadBytes(storageRef, avatarFileRef.current);
-        avatarUrl = await getDownloadURL(storageRef);
+        try {
+          const resized = await resizeAvatar(avatarFileRef.current);
+          const storageRef = ref(storage, `avatars/${user.uid}`);
+          await uploadBytes(storageRef, resized, { contentType: "image/jpeg" });
+          avatarUrl = await getDownloadURL(storageRef);
+        } catch (uploadErr) {
+          // Non-blocking — onboarding continues without an avatar.
+          console.warn("Avatar upload during onboarding failed:", uploadErr);
+        }
       }
 
       if (user) {

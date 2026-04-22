@@ -143,7 +143,7 @@ export async function syncChallengeProgress(
   ]);
   if (joined.length === 0) return;
 
-  await Promise.all(joined.map((challenge) => {
+  await Promise.all(joined.map(async (challenge) => {
     let progress = 0;
 
     switch (challenge.targetType) {
@@ -162,15 +162,40 @@ export async function syncChallengeProgress(
         break;
     }
 
-    // Write progress + public stats + current profile to participant doc (readable by all authenticated users)
-    return updateDocument(`challenges/${challenge.id}/participants/${uid}`, {
+    // Respect the participant's per-challenge privacy toggle. `progress` stays
+    // public (needed for leaderboard rank), but personal stats (streakDays,
+    // totalWorkoutsCompleted, alignmentScore) are only written when the user
+    // opted in to share. Prevents a privacy gap where the modal hides stats
+    // visually but they're still readable via a direct Firestore query.
+    const participantPath = `challenges/${challenge.id}/participants/${uid}`;
+    let shareProgress = true;
+    try {
+      const p = await getDocument<{ shareProgress?: boolean }>(participantPath);
+      shareProgress = p?.shareProgress !== false;
+    } catch {
+      // Default to sharing on read failure — better to have slightly-stale
+      // privacy defaults than to silently drop leaderboard progress.
+    }
+
+    const baseUpdate: Record<string, unknown> = {
       progress: Math.min(Math.round(progress), 100),
-      streakDays: behaviorState.streakDays,
-      totalWorkoutsCompleted: behaviorState.totalWorkoutsCompleted,
-      alignmentScore: behaviorState.alignmentScore,
       callsign: profile?.callsign ?? "",
       avatarUrl: profile?.avatarUrl ?? "",
-    }).catch(console.warn);
+    };
+    const statsUpdate = shareProgress
+      ? {
+          streakDays: behaviorState.streakDays,
+          totalWorkoutsCompleted: behaviorState.totalWorkoutsCompleted,
+          alignmentScore: behaviorState.alignmentScore,
+        }
+      : {
+          // Clear previously-leaked stats if user toggled off sharing
+          streakDays: null,
+          totalWorkoutsCompleted: null,
+          alignmentScore: null,
+        };
+
+    return updateDocument(participantPath, { ...baseUpdate, ...statsUpdate }).catch(console.warn);
   }));
 }
 

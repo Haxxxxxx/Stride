@@ -3,7 +3,7 @@
 // Delivers calibrated friction responses (10-15% of eligible cases)
 // For agents Atlas, Orion, and Kade
 
-import { getBehaviorState } from "./behaviorStore";
+import { getBehaviorState, maybeExpireInjuryFlag } from "./behaviorStore";
 
 // ============================================================
 // CONTRADICTION DETECTORS
@@ -105,6 +105,8 @@ function detectConstraintMismatch(): DetectionResult {
 
 // E. Safety/Stress Blockers (SB)
 function checkSafetyBlockers(): boolean {
+  // Expire stale injury flag before checking — 72h cool-down.
+  maybeExpireInjuryFlag();
   const state = getBehaviorState();
   return state.injuryFlag || state.burnoutFlag;
 }

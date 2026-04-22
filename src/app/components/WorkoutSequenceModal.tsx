@@ -11,6 +11,7 @@ import {
   getBehaviorState,
   updateBehaviorState,
   refreshWorkoutCounts,
+  raiseInjuryFlag,
 } from "../utils/behaviorStore";
 import { useAuth } from "../contexts/AuthContext";
 import { setDocument } from "../../services/firestore";
@@ -23,15 +24,26 @@ interface WorkoutSequenceModalProps {
   isOpen: boolean;
   onClose: () => void;
   workoutDay?: WorkoutDay | null;
+  /** True when this is a bonus/ad-hoc workout (separate WIP slot so it can't
+   *  clobber a paused regular workout, and vice versa). */
+  isBonus?: boolean;
 }
 
 const MONO = "font-['JetBrains_Mono',monospace]";
 
-/** localStorage key for in-progress workout session */
-export const WIP_KEY = "stride_workout_wip";
+/** localStorage key for in-progress regular (scheduled) workout session */
+export const WIP_KEY_REGULAR = "stride_workout_wip";
+/** localStorage key for in-progress bonus workout session */
+export const WIP_KEY_BONUS = "stride_workout_wip_bonus";
+/** Back-compat alias — callers still reading the single legacy key fall back here */
+export const WIP_KEY = WIP_KEY_REGULAR;
 
 /** WIP sessions older than this are considered stale and discarded (2 hours) */
 export const WIP_EXPIRY_MS = 2 * 60 * 60 * 1000;
+
+function wipKeyFor(isBonus: boolean): string {
+  return isBonus ? WIP_KEY_BONUS : WIP_KEY_REGULAR;
+}
 
 /** Idle time before triggering a hesitation event (35 seconds) */
 const HESITATION_DELAY_MS = 35_000;
@@ -58,41 +70,61 @@ function exerciseFingerprint(exercises: { name: string }[]): string {
   return exercises.map(e => e.name).join("|");
 }
 
-function saveWIP(data: Omit<WorkoutWIP, "savedAt">) {
+function readWIPFromKey(key: string): WorkoutWIP | null {
   try {
-    localStorage.setItem(WIP_KEY, JSON.stringify({ ...data, savedAt: Date.now() }));
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const wip: WorkoutWIP = JSON.parse(raw);
+    if (Date.now() - wip.savedAt > WIP_EXPIRY_MS) return null;
+    return wip;
+  } catch { return null; }
+}
+
+function saveWIP(data: Omit<WorkoutWIP, "savedAt">, isBonus: boolean) {
+  try {
+    localStorage.setItem(wipKeyFor(isBonus), JSON.stringify({ ...data, savedAt: Date.now() }));
   } catch { /* quota exceeded — non-critical */ }
 }
 
+/** Load WIP matching a workout name — checks both regular and bonus slots */
 export function loadWIP(workoutName: string): WorkoutWIP | null {
-  try {
-    const raw = localStorage.getItem(WIP_KEY);
-    if (!raw) return null;
-    const wip: WorkoutWIP = JSON.parse(raw);
-    if (Date.now() - wip.savedAt > WIP_EXPIRY_MS) return null;
-    // Match by name — but also accept if the WIP is for the same day slot
-    // (program may have been renamed via regenerateDay since the WIP was saved)
-    if (wip.workoutName !== workoutName) return null;
-    return wip;
-  } catch { return null; }
+  const regular = readWIPFromKey(WIP_KEY_REGULAR);
+  if (regular && regular.workoutName === workoutName) return regular;
+  const bonus = readWIPFromKey(WIP_KEY_BONUS);
+  if (bonus && bonus.workoutName === workoutName) return bonus;
+  return null;
 }
 
-/** Load any WIP regardless of workout name — for detecting stale/orphaned WIP */
+/** Load the regular-slot WIP (today's scheduled workout) */
+export function loadRegularWIP(): WorkoutWIP | null {
+  return readWIPFromKey(WIP_KEY_REGULAR);
+}
+
+/** Load the bonus-slot WIP (ad-hoc workouts from the agent) */
+export function loadBonusWIP(): WorkoutWIP | null {
+  return readWIPFromKey(WIP_KEY_BONUS);
+}
+
+/** Load either WIP — prefers whichever was saved more recently.
+ *  Kept for call sites that just want to know "is a workout in progress?" */
 export function loadAnyWIP(): WorkoutWIP | null {
-  try {
-    const raw = localStorage.getItem(WIP_KEY);
-    if (!raw) return null;
-    const wip: WorkoutWIP = JSON.parse(raw);
-    if (Date.now() - wip.savedAt > WIP_EXPIRY_MS) return null;
-    return wip;
-  } catch { return null; }
+  const regular = readWIPFromKey(WIP_KEY_REGULAR);
+  const bonus = readWIPFromKey(WIP_KEY_BONUS);
+  if (regular && bonus) return regular.savedAt >= bonus.savedAt ? regular : bonus;
+  return regular ?? bonus;
 }
 
-export function clearWIP() {
-  localStorage.removeItem(WIP_KEY);
+export function clearWIP(isBonus?: boolean) {
+  // Legacy call with no arg → clear whichever WIP is currently active.
+  if (isBonus === undefined) {
+    localStorage.removeItem(WIP_KEY_REGULAR);
+    localStorage.removeItem(WIP_KEY_BONUS);
+    return;
+  }
+  localStorage.removeItem(wipKeyFor(isBonus));
 }
 
-export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSequenceModalProps) {
+export function WorkoutSequenceModal({ isOpen, onClose, workoutDay, isBonus = false }: WorkoutSequenceModalProps) {
   const { user } = useAuth();
   const [status, setStatus] = useState<
     "initializing" | "ready" | "readiness" | "active" | "setLog" | "resting" | "paused" | "transition" | "complete" | "reflection" | "encoded"
@@ -174,7 +206,21 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
   const pipVideoRef = useRef<HTMLVideoElement | null>(null);
   const pipCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const pipIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pipSupported = typeof document !== "undefined" && "pictureInPictureEnabled" in document && (document as any).pictureInPictureEnabled;
+  // iOS Safari exposes pictureInPictureEnabled on video but does NOT support
+  // HTMLCanvasElement.captureStream — so the canvas→video→PiP pipeline silently fails.
+  // Require BOTH the PiP API and canvas.captureStream to be real functions, and
+  // explicitly opt out on iOS (PiP only works with <video src> there, not canvas streams).
+  const pipSupported = (() => {
+    if (typeof document === "undefined" || typeof window === "undefined") return false;
+    if (!("pictureInPictureEnabled" in document)) return false;
+    if (!(document as { pictureInPictureEnabled?: boolean }).pictureInPictureEnabled) return false;
+    if (typeof HTMLCanvasElement === "undefined") return false;
+    if (typeof HTMLCanvasElement.prototype.captureStream !== "function") return false;
+    const ua = navigator.userAgent || "";
+    const isIOS = /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && "ontouchend" in document);
+    if (isIOS) return false;
+    return true;
+  })();
 
   // Ref for PiP render loop — holds latest display state without stale closures
   const pipDisplayRef = useRef({
@@ -443,7 +489,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
           removedExercises: s.removedExercises,
           exerciseHash: exerciseFingerprint(s.exercises),
           snapshotExercises: s.exercises,
-        });
+        }, isBonus);
       }
     };
     // Save WIP when page goes hidden (mobile app switch, lock screen)
@@ -484,10 +530,10 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
         removedExercises,
         exerciseHash: exerciseFingerprint(exercises),
         snapshotExercises: exercises,
-      });
+      }, isBonus);
     }
     onClose();
-  }, [status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, removedExercises, exercises, onClose]);
+  }, [status, workoutName, currentExerciseIdx, currentSet, exerciseLogs, currentSetData, readiness, resolvedOrder, skippedExercises, removedExercises, exercises, onClose, isBonus]);
 
   // Escape key — save WIP and close
   useEffect(() => {
@@ -522,7 +568,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
           }
           if (resumeIdx === -1) {
             // All exercises were completed before program changed — save and close
-            clearWIP(); wipFinishedRef.current = true;
+            clearWIP(isBonus); wipFinishedRef.current = true;
             // Save workout log directly (handleComplete has stale closures in useEffect)
             if (wip.exerciseLogs.length > 0 && user) {
               const totalVolume = wip.exerciseLogs.reduce((sum, ex) =>
@@ -567,7 +613,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
           setNeuroplasticMessage("");
           setReflectionText("");
           setShowHesitation(false);
-          clearWIP();
+          clearWIP(isBonus);
           return;
         } else {
           // Restore saved session
@@ -733,6 +779,12 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
   };
 
   const handleReadinessComplete = () => {
+    // If the operator reported pain in the readiness check, raise the injury
+    // safety flag. Suppresses friction delivery until the flag auto-expires
+    // (72h) or a pain-free workout clears it.
+    if (readiness.painReported) {
+      raiseInjuryFlag(readiness.painLocation);
+    }
     recordWorkoutStarted();
     setStartMessage(getRandomMessage("workoutStart"));
     setStatus("active");
@@ -765,9 +817,10 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     // Reset countdown for the next set
     setCountdown(null);
 
-    // Pain safety check
+    // Pain safety check — raise injury flag so agent context + friction
+    // engine know to back off. Auto-complete the exercise + advance.
     if (setPain === "severe") {
-      // Auto-complete exercise, move to next
+      raiseInjuryFlag(exerciseName);
       finalizeExercise(updatedSetData);
       return;
     }
@@ -964,7 +1017,11 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
   };
 
   const handleComplete = (finalLogs: ExerciseLog[], currentSkipped?: number[], currentOrder?: number[], currentRemoved?: number[]) => {
-    clearWIP(); wipFinishedRef.current = true; closePiP();
+    // Re-entry guard: prevents duplicate Firestore writes if this fires twice
+    // (rapid double-tap on complete, or a severe-pain auto-complete colliding with a
+    // set-complete press). wipFinishedRef doubles as the idempotency flag.
+    if (wipFinishedRef.current) return;
+    clearWIP(isBonus); wipFinishedRef.current = true; closePiP();
     // If no exercises were actually completed (all skipped/removed), close without saving
     if (finalLogs.length === 0) {
       onClose();
@@ -983,6 +1040,8 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
     const completionType = finalLogs.length >= unskippedCount ? "full" : "partial";
     // Save immediately so data is never lost (even if user closes during animation)
     saveWorkoutLog(finalLogs, completionType);
+    // Clear any generated bonus workout — it's been consumed (no-op for regular workouts)
+    try { localStorage.removeItem("stride_bonus_workout"); } catch { /* ignore */ }
     const completedFull = completionType === "full";
     setStatus("initializing");
     completionDelayRef.current = setTimeout(() => {
@@ -995,9 +1054,12 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
 
   /** End session early — save whatever was completed as a partial workout */
   const handleEndSessionEarly = () => {
+    // Idempotency: skip if a save already ran (prevents double-logging if the user
+    // hits End Session Early right after handleComplete fired).
+    if (wipFinishedRef.current) { onClose(); return; }
     if (!window.confirm("End session early? Remaining exercises will not be logged.")) return;
     clearHesitationTimer();
-    clearWIP(); wipFinishedRef.current = true; closePiP();
+    clearWIP(isBonus); wipFinishedRef.current = true; closePiP();
     const partialLogs = currentSetData.length > 0
       ? [...exerciseLogs, {
           name: exerciseName,
@@ -1008,6 +1070,8 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
         } as ExerciseLog]
       : [...exerciseLogs];
     saveWorkoutLog(partialLogs, "partial");
+    // Clear any generated bonus workout — it's been consumed (no-op for regular workouts)
+    try { localStorage.removeItem("stride_bonus_workout"); } catch { /* ignore */ }
     onClose();
   };
 
@@ -1802,7 +1866,7 @@ export function WorkoutSequenceModal({ isOpen, onClose, workoutDay }: WorkoutSeq
           {status === "encoded" && (
             <>
               <button
-                onClick={() => { clearWIP(); wipFinishedRef.current = true; closePiP(); onClose(); }}
+                onClick={() => { clearWIP(isBonus); wipFinishedRef.current = true; closePiP(); onClose(); }}
                 className={`w-full bg-[#ff6600] text-black ${MONO} text-[12px] font-bold uppercase tracking-wider py-4 hover:bg-[#ff8833] transition-colors`}
               >
                 Return to Dashboard

@@ -1,9 +1,10 @@
 import image_649dc395704951058b9543ab59c196ca800a5539 from 'figma:asset/649dc395704951058b9543ab59c196ca800a5539.webp'
-import { useState, lazy, Suspense } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
 import { useNavigate } from "react-router";
 import { useOnboardingStore } from "../../../stores/onboardingStore";
 import { sendEmailSignInLink, signInWithGoogle } from "../../../services/auth";
 import { routeAfterAuth } from "../../utils/routeAfterAuth";
+import { useAuth } from "../../contexts/AuthContext";
 
 // Lazy-loaded — the entire Solana adapter bundle only fetches when the wallet
 // button is rendered for the first time. Never included in the initial chunk.
@@ -11,11 +12,20 @@ const WalletConnectButton = lazy(() => import("./WalletConnectButton"));
 
 export default function Welcome() {
   const navigate = useNavigate();
+  const { user, loading: authLoading } = useAuth();
   const { email, setEmail } = useOnboardingStore();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   // showWallet starts false — the lazy chunk only loads after first render of the button
   const [showWallet, setShowWallet] = useState(false);
+
+  // If an already-authenticated user lands here (e.g. tapped "Get Started" on
+  // the marketing Hero/CTA while still signed in), skip straight to their
+  // correct destination instead of re-showing the sign-in screen.
+  useEffect(() => {
+    if (authLoading || !user) return;
+    routeAfterAuth(user.uid, navigate);
+  }, [user, authLoading, navigate]);
 
   const handleContinue = async () => {
     if (!email) return;

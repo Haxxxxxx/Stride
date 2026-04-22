@@ -57,6 +57,10 @@ export interface BehaviorState {
   // Safety flags
   injuryFlag: boolean;
   burnoutFlag: boolean;
+  /** Timestamp when injuryFlag was raised — used to auto-clear after cool-down window */
+  injuryFlagSetAt?: number;
+  /** Where the pain was reported (for agent context when injury flag is active) */
+  injuryLocation?: string;
 
   // Friction tracking
   lastFrictionTimestamp: number;
@@ -125,6 +129,8 @@ const DEFAULT_STATE: BehaviorState = {
   constraints: [],
   injuryFlag: false,
   burnoutFlag: false,
+  injuryFlagSetAt: 0,
+  injuryLocation: "",
   lastFrictionTimestamp: 0,
   frictionCountInSession: 0,
   totalAgentInteractions: 0,
@@ -497,6 +503,41 @@ export function recordWorkoutCompleted(): BehaviorState {
   });
 }
 
+/** Raise the injury safety flag — suppresses ALL friction delivery until it
+ *  auto-expires (72h) or is explicitly cleared. Called from the workout modal
+ *  when an operator reports severe pain on a set or in readiness. */
+export function raiseInjuryFlag(location?: string): BehaviorState {
+  return updateBehaviorState({
+    injuryFlag: true,
+    injuryFlagSetAt: Date.now(),
+    injuryLocation: location?.trim() ?? "",
+  });
+}
+
+/** Clear the injury flag — called when the operator completes a pain-free
+ *  workout or explicitly marks themselves recovered. */
+export function clearInjuryFlag(): BehaviorState {
+  return updateBehaviorState({
+    injuryFlag: false,
+    injuryFlagSetAt: 0,
+    injuryLocation: "",
+  });
+}
+
+/** 72h auto-expiry window — call opportunistically so a one-tap pain report
+ *  doesn't silently suppress friction forever if the user never returns. */
+export function maybeExpireInjuryFlag(): BehaviorState {
+  const state = getBehaviorState();
+  if (!state.injuryFlag) return state;
+  const setAt = state.injuryFlagSetAt || 0;
+  if (setAt === 0) return state;
+  const hoursSince = (Date.now() - setAt) / (1000 * 60 * 60);
+  if (hoursSince >= 72) {
+    return clearInjuryFlag();
+  }
+  return state;
+}
+
 export function recordWorkoutSkipped(): BehaviorState {
   const state = getBehaviorState();
   return updateBehaviorState({
@@ -527,8 +568,17 @@ export function checkMissedWorkout(totalTrainingDays: number): void {
   const lastSkipped = state.lastWorkoutSkippedAt || 0;
   const lastRecorded = Math.max(lastCompleted, lastSkipped);
 
-  // Skip if we already checked and no new event has been recorded since
-  if (state.lastMissCheckTimestamp && lastRecorded <= state.lastMissCheckTimestamp) {
+  // Skip only if we already checked TODAY and no new event recorded since the
+  // last check. The old logic (lastRecorded <= lastMissCheckTimestamp) returned
+  // early once lastMissCheckTimestamp was set, which silently skipped detection
+  // on subsequent calendar days — a user opening the app every morning would
+  // never have their missed training days flagged after the first check.
+  const lastCheckDay = state.lastMissCheckTimestamp
+    ? new Date(state.lastMissCheckTimestamp).toDateString()
+    : "";
+  const todayDayStr = new Date(now).toDateString();
+  const alreadyCheckedToday = lastCheckDay === todayDayStr;
+  if (alreadyCheckedToday && state.lastMissCheckTimestamp && lastRecorded <= state.lastMissCheckTimestamp) {
     return;
   }
 

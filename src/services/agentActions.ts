@@ -2,9 +2,9 @@
 // Executes agentic function calls from Gemini on user programs
 // Read actions return data immediately; write actions return proposals for user confirmation
 
-import { queryCollection, updateDocument, where, getDocument, setDocument, orderBy, limit } from "./firestore";
+import { queryCollection, updateDocument, where, getDocument, setDocument, orderBy, limit, batchWrite } from "./firestore";
 import type { Program, Exercise, Week, WorkoutDay, PersonalizationData } from "./programGenerator";
-import { toLocalISO, getCurrentProgramWeek } from "../app/utils/dateUtils";
+import { toLocalISO, getCurrentProgramWeek, getTodayDayIndex } from "../app/utils/dateUtils";
 
 // ============================================================
 // Types
@@ -47,6 +47,11 @@ async function getActiveProgramDoc(uid: string): Promise<ProgramDoc | null> {
   return programs[0] ?? null;
 }
 
+/** Normalize exercise name for comparison — lowercase, collapse whitespace, strip punctuation */
+function normalizeName(name: string): string {
+  return name.toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function findExercise(
   program: ProgramDoc,
   weekNumber: number,
@@ -57,11 +62,38 @@ function findExercise(
   if (!week) return null;
   const day = week.days.find((d) => d.dayNumber === dayNumber);
   if (!day) return null;
-  const exerciseIndex = day.exercises.findIndex(
-    (e) => e.name.toLowerCase() === exerciseName.toLowerCase()
-  );
-  if (exerciseIndex === -1) return null;
-  return { week, day, exerciseIndex };
+
+  const query = normalizeName(exerciseName);
+  if (!query) return null;
+
+  // Tier 1: exact normalized match ("Bench Press" → "bench press")
+  let idx = day.exercises.findIndex((e) => normalizeName(e.name) === query);
+  if (idx !== -1) return { week, day, exerciseIndex: idx };
+
+  // Tier 2: single substring match ("bench press" matches "Barbell Bench Press",
+  // but only if exactly one exercise contains the query — avoids ambiguous
+  // matches like "press" hitting both bench and leg press)
+  const substringMatches = day.exercises
+    .map((e, i) => ({ i, name: normalizeName(e.name) }))
+    .filter((e) => e.name.includes(query));
+  if (substringMatches.length === 1) {
+    return { week, day, exerciseIndex: substringMatches[0].i };
+  }
+
+  // Tier 3: all query tokens appear in the exercise name (handles reordering
+  // like "press bench" or "leg press machine" → "machine leg press"), but
+  // again only if unambiguous
+  const queryTokens = query.split(" ").filter((t) => t.length > 2);
+  if (queryTokens.length >= 2) {
+    const tokenMatches = day.exercises
+      .map((e, i) => ({ i, name: normalizeName(e.name) }))
+      .filter((e) => queryTokens.every((t) => e.name.includes(t)));
+    if (tokenMatches.length === 1) {
+      return { week, day, exerciseIndex: tokenMatches[0].i };
+    }
+  }
+
+  return null;
 }
 
 // ============================================================
@@ -103,6 +135,58 @@ async function handleGetActiveProgram(uid: string): Promise<ActionResult> {
         })),
       })),
       currentWeekNumber: currentWeekNum,
+    },
+  };
+}
+
+async function handleGetTodayWorkout(uid: string): Promise<ActionResult> {
+  const program = await getActiveProgramDoc(uid);
+  if (!program) {
+    return {
+      type: "data",
+      data: { found: false, message: "No active program found." },
+    };
+  }
+
+  const currentWeekNum = getCurrentProgramWeek(program.createdAt, program.weeks.length);
+  const week = program.weeks[currentWeekNum - 1] ?? program.weeks[0];
+  const totalDaysInWeek = week?.days.length ?? 0;
+  const todayIdx = getTodayDayIndex();
+  const isRestDay = totalDaysInWeek > 0 && todayIdx >= totalDaysInWeek;
+  const day = isRestDay ? null : week?.days[todayIdx];
+
+  if (!day) {
+    return {
+      type: "data",
+      data: {
+        found: true,
+        programName: program.name,
+        weekNumber: currentWeekNum,
+        weekType: week?.weekType ?? "accumulation",
+        isRestDay: true,
+        message: "Today is a scheduled rest day.",
+      },
+    };
+  }
+
+  return {
+    type: "data",
+    data: {
+      found: true,
+      programName: program.name,
+      weekNumber: currentWeekNum,
+      weekType: week?.weekType ?? "accumulation",
+      isRestDay: false,
+      day: {
+        dayNumber: day.dayNumber,
+        name: day.name,
+        exercises: day.exercises.map((e) => ({
+          name: e.name,
+          sets: e.sets,
+          reps: e.reps,
+          rest: e.rest,
+        })),
+      },
     },
   };
 }
@@ -157,13 +241,12 @@ async function handleSwapExercise(
       // Re-fetch to avoid stale closure overwriting concurrent edits
       const fresh = await getActiveProgramDoc(uid);
       if (!fresh) throw new Error("Program not found");
+      const match = findExercise(fresh, weekNum, dayNum, exerciseName);
+      if (!match) throw new Error(`Exercise "${exerciseName}" not found`);
       const updatedWeeks = structuredClone(fresh.weeks);
-      const week = updatedWeeks.find((w) => w.weekNumber === weekNum);
-      const day = week?.days.find((d) => d.dayNumber === dayNum);
-      if (!week || !day) throw new Error(`Day ${dayNum} in week ${weekNum} not found`);
-      const idx = day.exercises.findIndex((e) => e.name.toLowerCase() === exerciseName.toLowerCase());
-      if (idx === -1) throw new Error(`Exercise "${exerciseName}" not found`);
-      day.exercises[idx] = {
+      const week = updatedWeeks.find((w) => w.weekNumber === weekNum)!;
+      const day = week.days.find((d) => d.dayNumber === dayNum)!;
+      day.exercises[match.exerciseIndex] = {
         name: newExerciseName,
         sets: newSets,
         reps: newReps,
@@ -221,13 +304,17 @@ async function handleAdjustVolume(
     execute: async () => {
       const fresh = await getActiveProgramDoc(uid);
       if (!fresh) throw new Error("Program not found");
+      const match = findExercise(fresh, weekNum, dayNum, exerciseName);
+      if (!match) throw new Error(`Exercise "${exerciseName}" not found`);
       const updatedWeeks = structuredClone(fresh.weeks);
-      const week = updatedWeeks.find((w) => w.weekNumber === weekNum);
-      const day = week?.days.find((d) => d.dayNumber === dayNum);
-      if (!week || !day) throw new Error(`Day ${dayNum} in week ${weekNum} not found`);
-      const idx = day.exercises.findIndex((e) => e.name.toLowerCase() === exerciseName.toLowerCase());
-      if (idx === -1) throw new Error(`Exercise "${exerciseName}" not found`);
-      day.exercises[idx] = { ...day.exercises[idx], sets: newSets, reps: newReps, rest: newRest };
+      const week = updatedWeeks.find((w) => w.weekNumber === weekNum)!;
+      const day = week.days.find((d) => d.dayNumber === dayNum)!;
+      day.exercises[match.exerciseIndex] = {
+        ...day.exercises[match.exerciseIndex],
+        sets: newSets,
+        reps: newReps,
+        rest: newRest,
+      };
       await updateDocument(`users/${uid}/programs/${fresh.id}`, {
         weeks: updatedWeeks,
       });
@@ -449,7 +536,10 @@ async function handleGenerateDeloadWeek(
       const updatedWeeks = structuredClone(fresh.weeks);
       const w = updatedWeeks.find((w) => w.weekNumber === weekNum);
       if (!w) throw new Error(`Week ${weekNum} not found`);
-      // Rebuild deload from fresh data
+      // Guard against double-deload — if the fresh doc shows this week is
+      // already a deload, skip the write. Prevents compounding the volume cut
+      // if the same deload proposal was queued twice (client-side race).
+      if (w.weekType === "deload") return;
       w.days = w.days.map((day) => ({
         ...day,
         exercises: day.exercises.map((ex) => ({
@@ -457,6 +547,9 @@ async function handleGenerateDeloadWeek(
           sets: Math.max(2, Math.ceil(ex.sets * 0.6)),
         })),
       }));
+      // Flag the week as deload so subsequent calls see it and refuse, and so
+      // the weeksSinceLastDeload counter can reset correctly when consumed.
+      w.weekType = "deload";
       await updateDocument(`users/${uid}/programs/${fresh.id}`, {
         weeks: updatedWeeks,
       });
@@ -591,6 +684,10 @@ async function handleAddExercise(
         const w = updatedWeeks.find((w) => w.weekNumber === weekNum);
         const d = w?.days.find((d) => d.dayNumber === dayNum);
         if (!w || !d) throw new Error(`Day ${dayNum} in week ${weekNum} not found`);
+        // Re-check for duplicate against FRESH program — a concurrent confirm
+        // from another tab could have already added this exercise. Idempotent.
+        const nameNorm = normalizeName(name);
+        if (d.exercises.some((e) => normalizeName(e.name) === nameNorm)) return;
         d.exercises.push(newExercise);
         await updateDocument(`users/${uid}/programs/${fresh.id}`, { weeks: updatedWeeks });
       },
@@ -627,13 +724,12 @@ async function handleRemoveExercise(
       execute: async () => {
         const fresh = await getActiveProgramDoc(uid);
         if (!fresh) throw new Error("Program not found");
+        const match = findExercise(fresh, weekNum, dayNum, exerciseName);
+        if (!match) throw new Error(`Exercise "${exerciseName}" not found`);
         const updatedWeeks = structuredClone(fresh.weeks);
-        const w = updatedWeeks.find((w) => w.weekNumber === weekNum);
-        const d = w?.days.find((d) => d.dayNumber === dayNum);
-        if (!w || !d) throw new Error(`Day ${dayNum} in week ${weekNum} not found`);
-        const idx = d.exercises.findIndex((e) => e.name.toLowerCase() === exerciseName.toLowerCase());
-        if (idx === -1) throw new Error(`Exercise "${exerciseName}" not found`);
-        d.exercises.splice(idx, 1);
+        const w = updatedWeeks.find((w) => w.weekNumber === weekNum)!;
+        const d = w.days.find((d) => d.dayNumber === dayNum)!;
+        d.exercises.splice(match.exerciseIndex, 1);
         await updateDocument(`users/${uid}/programs/${fresh.id}`, { weeks: updatedWeeks });
       },
     },
@@ -819,7 +915,7 @@ async function handleGenerateBonusWorkout(
 
 /** All known agent tool names — shared with AIAgent for text-call detection */
 export const AGENT_TOOL_NAMES = [
-  "getActiveProgram", "swapExercise", "adjustVolume", "skipWorkoutDay",
+  "getActiveProgram", "getTodayWorkout", "swapExercise", "adjustVolume", "skipWorkoutDay",
   "regenerateDay", "regenerateWeek", "generateDeloadWeek", "getRecentPerformance",
   "getWorkoutHistory", "addExercise", "removeExercise", "generateBonusWorkout",
   "loadDayWorkout", "logActivity", "generateNewProgram",
@@ -841,25 +937,29 @@ async function handleGenerateNewProgram(
       const personalization = await getDocument<PersonalizationData>(`users/${uid}/personalization/data`);
       if (!personalization) throw new Error("No personalization data found. Complete onboarding first.");
 
-      // Generate the new program
       const program = await generateProgram(personalization);
 
-      // Deactivate the old program
       const oldPrograms = await queryCollection<ProgramDoc>(
         `users/${uid}/programs`,
         [where("active", "==", true)]
       );
-      for (const old of oldPrograms) {
-        await updateDocument(`users/${uid}/programs/${old.id}`, { active: false });
-      }
-
-      // Save the new program
       const programId = `prog_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      await setDocument(`users/${uid}/programs/${programId}`, {
-        ...program,
-        active: true,
-        createdAt: toLocalISO(new Date()),
-      }, false);
+
+      // Atomic swap: deactivate old + create new in a single batch so there's
+      // never a window where the user has zero active programs.
+      await batchWrite([
+        ...oldPrograms.map(old => ({
+          type: "update" as const,
+          path: `users/${uid}/programs/${old.id}`,
+          data: { active: false },
+        })),
+        {
+          type: "set" as const,
+          path: `users/${uid}/programs/${programId}`,
+          data: { ...program, active: true, createdAt: toLocalISO(new Date()) },
+          merge: false,
+        },
+      ]);
     },
   };
 
@@ -885,6 +985,8 @@ export async function executeAction(
   switch (normalized) {
     case "getActiveProgram":
       result = await handleGetActiveProgram(uid); break;
+    case "getTodayWorkout":
+      result = await handleGetTodayWorkout(uid); break;
     case "swapExercise":
       result = await handleSwapExercise(uid, args); break;
     case "adjustVolume":

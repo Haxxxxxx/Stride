@@ -129,6 +129,13 @@ export async function joinSquad(
   callsign?: string,
   avatarUrl?: string
 ): Promise<void> {
+  // Duplicate guard — matches joinChallenge pattern. Prevents memberCount
+  // double-increments if this is called twice (retry after network error,
+  // cross-tab race, etc.). The member doc itself is idempotent via merge=true,
+  // but the increment isn't.
+  const existing = await getDocument(`squads/${squadId}/members/${uid}`);
+  if (existing) return;
+
   await batchWrite([
     {
       type: "set",
