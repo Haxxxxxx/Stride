@@ -51,14 +51,14 @@ export default function ProgramForging() {
           gymAccess: store.gymAccess,
           height: store.height,
           weight: store.weight,
-          goalWeight: store.optimizationGoal === "fat-loss" ? store.goalWeight : undefined,
+          // Firestore rejects `undefined` — omit goalWeight unless fat-loss path
+          ...(store.optimizationGoal === "fat-loss"
+            ? { goalWeight: store.goalWeight }
+            : {}),
         };
 
         await setDocument(`users/${user.uid}/personalization/data`, {
           ...personalization,
-          height: store.height,
-          weight: store.weight,
-          ...(store.optimizationGoal === "fat-loss" ? { goalWeight: store.goalWeight } : {}),
           selectedAgent: store.selectedAgent,
         });
 
